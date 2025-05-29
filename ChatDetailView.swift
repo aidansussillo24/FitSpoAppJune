@@ -10,55 +10,45 @@ struct ChatDetailView: View {
     @State private var listener: ListenerRegistration?
     @State private var profiles: [String:(displayName:String, avatarURL:String)] = [:]
 
-    // Determine the “other” user’s UID by excluding our own
-    private var otherId: String {
-        guard let meUid = Auth.auth().currentUser?.uid else { return "" }
-        return chat.participants.first { $0 != meUid } ?? ""
+    // Current user ID
+    private var meUid: String? {
+        Auth.auth().currentUser?.uid
     }
 
-    // Show their displayName (or fallback to UID)
+    // The other participant’s UID
+    private var otherId: String {
+        guard let me = meUid else { return "" }
+        return chat.participants.first { $0 != me } ?? ""
+    }
+
+    // Display name in the nav bar
     private var navTitle: String {
         profiles[otherId]?.displayName ?? otherId
     }
 
     var body: some View {
         VStack {
-            // Message list
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(messages) { msg in
                             HStack(alignment: .bottom, spacing: 8) {
-                                // Incoming message: avatar + bubble + spacer
-                                if let meUid = Auth.auth().currentUser?.uid,
-                                   msg.senderId != meUid {
+                                if msg.senderId != meUid {
+                                    // Incoming message: avatar, bubble, spacer
                                     avatarView(userId: msg.senderId, size: 32)
+                                    messageBubble(for: msg, incoming: true)
+                                    Spacer()
                                 } else {
+                                    // Outgoing message: spacer, bubble
                                     Spacer()
-                                }
-
-                                Text(msg.text)
-                                    .padding()
-                                    .background(
-                                        (Auth.auth().currentUser?.uid == msg.senderId)
-                                            ? Color.blue.opacity(0.2)
-                                            : Color.gray.opacity(0.2)
-                                    )
-                                    .cornerRadius(8)
-
-                                // Outgoing message: spacer + bubble
-                                if let meUid = Auth.auth().currentUser?.uid,
-                                   msg.senderId == meUid {
-                                    Spacer()
+                                    messageBubble(for: msg, incoming: false)
                                 }
                             }
                             .id(msg.id)
-                            .onAppear {
-                                loadProfile(userId: msg.senderId)
-                            }
+                            .onAppear { loadProfile(userId: msg.senderId) }
                         }
                     }
-                    .padding()
+                    .padding(.horizontal)
                 }
                 .onChange(of: messages.count) { _ in
                     if let lastId = messages.last?.id {
@@ -71,8 +61,10 @@ struct ChatDetailView: View {
             HStack {
                 TextField("Message…", text: $newText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
-                Button("Send") { send() }
-                    .disabled(newText.isEmpty)
+                Button("Send") {
+                    send()
+                }
+                .disabled(newText.isEmpty)
             }
             .padding()
         }
@@ -85,6 +77,16 @@ struct ChatDetailView: View {
         .onDisappear {
             listener?.remove()
         }
+    }
+
+    // MARK: – Message bubble view
+    private func messageBubble(for msg: Message, incoming: Bool) -> some View {
+        Text(msg.text)
+            .padding(10)
+            .background(incoming
+                        ? Color.gray.opacity(0.2)
+                        : Color.blue.opacity(0.2))
+            .cornerRadius(10)
     }
 
     // MARK: – Avatar helper
@@ -111,28 +113,30 @@ struct ChatDetailView: View {
         }
     }
 
-    // MARK: – Load a user’s profile into our cache
+    // MARK: – Load profile data
     private func loadProfile(userId: String) {
         guard profiles[userId] == nil else { return }
         Firestore.firestore()
             .collection("users")
             .document(userId)
             .getDocument { snap, err in
-                guard err == nil, let d = snap?.data() else { return }
-                let name   = d["displayName"] as? String ?? userId
-                let avatar = d["avatarURL"]   as? String ?? ""
+                guard err == nil, let data = snap?.data() else { return }
+                let name   = data["displayName"] as? String ?? userId
+                let avatar = data["avatarURL"]   as? String ?? ""
                 DispatchQueue.main.async {
                     profiles[userId] = (displayName: name, avatarURL: avatar)
                 }
             }
     }
 
-    // MARK: – Real‐time listener for new messages
+    // MARK: – Real‐time listener
     private func startListening() {
         listener = NetworkService.shared.observeMessages(chatId: chat.id) { result in
             switch result {
             case .success(let msg):
-                DispatchQueue.main.async { messages.append(msg) }
+                DispatchQueue.main.async {
+                    messages.append(msg)
+                }
             case .failure(let err):
                 print("Msg listener error:", err)
             }
@@ -157,8 +161,8 @@ struct ChatDetailView_Previews: PreviewProvider {
             ChatDetailView(
                 chat: Chat(
                     id: "chat1",
-                    participants: ["u1", "u2"],
-                    lastMessage: "Hello!",
+                    participants: ["u1","u2"],
+                    lastMessage: "Hello",
                     lastTimestamp: Date()
                 )
             )
