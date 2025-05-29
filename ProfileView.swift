@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
+import FirebaseStorage
 
 struct ProfileView: View {
     // The user ID whose profile is shown
@@ -19,6 +20,10 @@ struct ProfileView: View {
     @State private var errorMessage: String = ""
     @State private var showingEdit: Bool = false
 
+    // Messaging state
+    @State private var activeChat: Chat?
+    @State private var showChat: Bool = false
+
     private let db = Firestore.firestore()
 
     // Two-column layout for posts
@@ -31,7 +36,6 @@ struct ProfileView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-                    // Avatar
                     avatarSection
 
                     // Name, Email & Bio
@@ -49,28 +53,24 @@ struct ProfileView: View {
                         }
                     }
 
-                    // Stats Row: Followers, Following, Posts
+                    // Stats Row
                     HStack(spacing: 32) {
-                        // Followers link (blue)
                         NavigationLink(destination: FollowersView(userId: userId)) {
                             statView(count: followersCount, label: "Followers")
                                 .foregroundColor(.blue)
                         }
                         .buttonStyle(PlainButtonStyle())
 
-                        // Following link (blue)
                         NavigationLink(destination: FollowingView(userId: userId)) {
                             statView(count: followingCount, label: "Following")
                                 .foregroundColor(.blue)
                         }
                         .buttonStyle(PlainButtonStyle())
 
-                        // Posts count (black)
                         statView(count: posts.count, label: "Posts")
-                            .foregroundColor(.primary)
                     }
 
-                    // Action Button
+                    // Action Buttons
                     if userId == Auth.auth().currentUser?.uid {
                         Button("Edit Profile") {
                             showingEdit = true
@@ -83,6 +83,15 @@ struct ProfileView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .padding(.top)
+
+                        Button {
+                            openChat()
+                        } label: {
+                            Label("Message", systemImage: "bubble.left.and.bubble.right")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 8)
                     }
 
                     if !errorMessage.isEmpty {
@@ -94,7 +103,7 @@ struct ProfileView: View {
 
                     Divider().padding(.vertical, 8)
 
-                    // Posts Grid (clickable)
+                    // Posts Grid
                     if isLoadingPosts {
                         ProgressView()
                             .scaleEffect(1.5)
@@ -126,42 +135,43 @@ struct ProfileView: View {
             .sheet(isPresented: $showingEdit) {
                 EditProfileView()
             }
+            .background(
+                Group {
+                    if let chat = activeChat {
+                        NavigationLink(
+                            destination: ChatDetailView(chat: chat),
+                            isActive: $showChat
+                        ) {
+                            EmptyView()
+                        }
+                    }
+                }
+            )
             .onAppear(perform: loadEverything)
         }
     }
-}
 
-private extension ProfileView {
-    // Single stat view (count + label)
-    func statView(count: Int, label: String) -> some View {
-        VStack {
-            Text("\(count)")
-                .font(.headline)
-            Text(label)
-                .font(.caption)
-        }
-    }
-
-    // Avatar section with AsyncImage
-    var avatarSection: some View {
+    // MARK: – Avatar section
+    private var avatarSection: some View {
         Group {
             if let url = URL(string: avatarURL), !avatarURL.isEmpty {
                 AsyncImage(url: url) { phase in
                     switch phase {
-                    case .empty: ProgressView()
+                    case .empty:
+                        ProgressView()
                     case .success(let img):
-                        img.resizable()
+                        img
+                            .resizable()
                             .aspectRatio(contentMode: .fill)
-                            .frame(width: 120, height: 120)
-                            .clipShape(Circle())
                     case .failure:
                         Image(systemName: "person.crop.circle.badge.exclamationmark")
                             .resizable()
-                            .frame(width: 120, height: 120)
-                            .foregroundColor(.gray)
-                    @unknown default: EmptyView()
+                    @unknown default:
+                        EmptyView()
                     }
                 }
+                .frame(width: 120, height: 120)
+                .clipShape(Circle())
             } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
@@ -173,7 +183,19 @@ private extension ProfileView {
         .padding(.top, 16)
     }
 
-    // Load everything
+    // MARK: – Stat subview
+    private func statView(count: Int, label: String) -> some View {
+        VStack {
+            Text("\(count)")
+                .font(.headline)
+            Text(label)
+                .font(.caption)
+        }
+    }
+}
+
+// MARK: – Private helpers
+private extension ProfileView {
     func loadEverything() {
         loadProfile()
         loadUserPosts()
@@ -182,16 +204,12 @@ private extension ProfileView {
     }
 
     func loadProfile() {
-        guard let me = Auth.auth().currentUser else { return }
-        email = me.email ?? ""
+        email = Auth.auth().currentUser?.email ?? ""
         db.collection("users").document(userId).getDocument { snap, err in
-            if let err = err {
-                errorMessage = err.localizedDescription; return
-            }
-            guard let d = snap?.data() else { return }
-            displayName = d["displayName"] as? String ?? ""
-            bio         = d["bio"]         as? String ?? ""
-            avatarURL   = d["avatarURL"]   as? String ?? ""
+            guard err == nil, let data = snap?.data() else { return }
+            displayName = data["displayName"] as? String ?? ""
+            bio         = data["bio"]         as? String ?? ""
+            avatarURL   = data["avatarURL"]   as? String ?? ""
         }
     }
 
@@ -200,11 +218,8 @@ private extension ProfileView {
         NetworkService.shared.fetchPosts { result in
             DispatchQueue.main.async {
                 isLoadingPosts = false
-                switch result {
-                case .success(let all):
+                if case .success(let all) = result {
                     posts = all.filter { $0.userId == userId }
-                case .failure(let err):
-                    errorMessage = err.localizedDescription
                 }
             }
         }
@@ -219,15 +234,11 @@ private extension ProfileView {
     }
 
     func loadFollowCounts() {
-        NetworkService.shared.fetchFollowCount(userId: userId, type: "followers") { result in
-            if case .success(let c) = result {
-                followersCount = c
-            }
+        NetworkService.shared.fetchFollowCount(userId: userId, type: "followers") { r in
+            if case .success(let c) = r { followersCount = c }
         }
-        NetworkService.shared.fetchFollowCount(userId: userId, type: "following") { result in
-            if case .success(let c) = result {
-                followingCount = c
-            }
+        NetworkService.shared.fetchFollowCount(userId: userId, type: "following") { r in
+            if case .success(let c) = r { followingCount = c }
         }
     }
 
@@ -236,11 +247,35 @@ private extension ProfileView {
             ? NetworkService.shared.unfollow
             : NetworkService.shared.follow
         action(userId) { err in
-            if let err = err {
-                errorMessage = err.localizedDescription
-            } else {
+            if err == nil {
                 isFollowing.toggle()
                 loadFollowCounts()
+            }
+        }
+    }
+
+    /// Fetch or create a chat then navigate
+    func openChat() {
+        guard let me = Auth.auth().currentUser?.uid else { return }
+        NetworkService.shared.fetchChats { result in
+            switch result {
+            case .success(let chats):
+                if let existing = chats.first(where: {
+                    $0.participants.contains(me) && $0.participants.contains(userId)
+                }) {
+                    activeChat = existing
+                    showChat = true
+                } else {
+                    let pair = [me, userId]
+                    NetworkService.shared.createChat(participants: pair) { res in
+                        if case .success(let newChat) = res {
+                            activeChat = newChat
+                            showChat = true
+                        }
+                    }
+                }
+            case .failure(let err):
+                print("Failed to fetch chats:", err)
             }
         }
     }

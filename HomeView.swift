@@ -41,11 +41,9 @@ struct HomeView: View {
                     .padding(.horizontal, 16)
                 }
             }
-            // Pull-to-refresh on the scrollable content
             .refreshable {
                 await fetchPostsAsync()
             }
-            // Initial load when the view appears
             .task {
                 await fetchPostsAsync()
             }
@@ -53,16 +51,37 @@ struct HomeView: View {
         }
     }
 
-    // MARK: – Async fetch using Swift concurrency
+    // MARK: – Header with DM button
+    private var header: some View {
+        ZStack {
+            Text("FitSpo")
+                .font(.largeTitle)
+                .fontWeight(.black)
+
+            HStack {
+                Spacer()
+                // 🚀 Direct Messages button
+                NavigationLink(destination: MessagesView()) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.title2)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: – Async fetch
     private func fetchPostsAsync() async {
         guard !isLoading else { return }
         isLoading = true
         do {
-            let fetched = try await withCheckedThrowingContinuation { continuation in
+            let fetched = try await withCheckedThrowingContinuation { cont in
                 NetworkService.shared.fetchPosts { result in
                     switch result {
-                    case .success(let posts): continuation.resume(returning: posts)
-                    case .failure(let error): continuation.resume(throwing: error)
+                    case .success(let posts): cont.resume(returning: posts)
+                    case .failure(let err):    cont.resume(throwing: err)
                     }
                 }
             }
@@ -71,7 +90,7 @@ struct HomeView: View {
                 isLoading = false
             }
         } catch {
-            print("Failed to fetch posts:", error)
+            print("Fetch failed:", error)
             await MainActor.run { isLoading = false }
         }
     }
@@ -86,27 +105,6 @@ struct HomeView: View {
                 }
             }
         }
-    }
-
-    // MARK: – Header view
-    private var header: some View {
-        ZStack {
-            Text("FitSpo")
-                .font(.largeTitle)
-                .fontWeight(.black)
-            HStack {
-                Spacer()
-                Button {
-                    // toggle layout if needed
-                } label: {
-                    Image(systemName: "rectangle.grid.2x2")
-                        .font(.title2)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 16)
-        .padding(.bottom, 8)
     }
 }
 
