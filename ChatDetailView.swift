@@ -1,3 +1,7 @@
+//
+//  ChatDetailView.swift
+//
+
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
@@ -6,72 +10,81 @@ struct ChatDetailView: View {
     let chat: Chat
 
     @State private var messages: [Message] = []
-    @State private var newText: String = ""
+    @State private var newText: String     = ""
     @State private var listener: ListenerRegistration?
-    @State private var profiles: [String:(displayName:String, avatarURL:String)] = [:]
 
-    // Current user ID
-    private var meUid: String? {
-        Auth.auth().currentUser?.uid
-    }
+    // cache other users’ profiles
+    @State private var profiles: [String:(displayName:String,avatarURL:String)] = [:]
 
-    // The other participant’s UID
+    private var meUid: String { Auth.auth().currentUser?.uid ?? "" }
     private var otherId: String {
-        guard let me = meUid else { return "" }
-        return chat.participants.first { $0 != me } ?? ""
+        chat.participants.first { $0 != meUid } ?? ""
     }
-
-    // Display name in the nav bar
     private var navTitle: String {
-        profiles[otherId]?.displayName ?? otherId
+        profiles[otherId]?.displayName ?? "…"
     }
 
     var body: some View {
         VStack {
+            // ─── Message list ─────────────────────────────────
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(messages) { msg in
                             HStack(alignment: .bottom, spacing: 8) {
                                 if msg.senderId != meUid {
-                                    // Incoming message: avatar, bubble, spacer
-                                    avatarView(userId: msg.senderId, size: 32)
-                                    messageBubble(for: msg, incoming: true)
+                                    avatar(for: msg.senderId, size: 32)
+                                    messageBubble(msg, incoming: true)
                                     Spacer()
                                 } else {
-                                    // Outgoing message: spacer, bubble
                                     Spacer()
-                                    messageBubble(for: msg, incoming: false)
+                                    messageBubble(msg, incoming: false)
                                 }
                             }
                             .id(msg.id)
-                            .onAppear { loadProfile(userId: msg.senderId) }
                         }
                     }
                     .padding(.horizontal)
                 }
                 .onChange(of: messages.count) { _ in
-                    if let lastId = messages.last?.id {
-                        proxy.scrollTo(lastId, anchor: .bottom)
+                    if let lastID = messages.last?.id {
+                        proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
             }
 
-            // Composer
+            // ─── Composer ─────────────────────────────────────
             HStack {
                 TextField("Message…", text: $newText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                 Button("Send") {
-                    send()
+                    let txt = newText.trimmingCharacters(in: .whitespaces)
+                    guard !txt.isEmpty else { return }
+                    newText = ""
+                    NetworkService.shared.sendMessage(
+                        chatId: chat.id,
+                        text: txt
+                    ) { _ in }
                 }
-                .disabled(newText.isEmpty)
+                .disabled(newText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding()
         }
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            startListening()
+            // start listener
+            listener = NetworkService.shared.observeMessages(
+                chatId: chat.id
+            ) { result in
+                switch result {
+                case .success(let m):
+                    DispatchQueue.main.async { messages.append(m) }
+                case .failure(let err):
+                    print("Msg listen error:", err)
+                }
+            }
+            // preload the other user’s profile
             loadProfile(userId: otherId)
         }
         .onDisappear {
@@ -79,26 +92,18 @@ struct ChatDetailView: View {
         }
     }
 
-    // MARK: – Message bubble view
-    private func messageBubble(for msg: Message, incoming: Bool) -> some View {
-        Text(msg.text)
-            .padding(10)
-            .background(incoming
-                        ? Color.gray.opacity(0.2)
-                        : Color.blue.opacity(0.2))
-            .cornerRadius(10)
-    }
+    // MARK: – Helpers
 
-    // MARK: – Avatar helper
     @ViewBuilder
-    private func avatarView(userId: String, size: CGFloat) -> some View {
-        if let profile = profiles[userId],
-           let url = URL(string: profile.avatarURL) {
+    private func avatar(for userId: String, size: CGFloat) -> some View {
+        if let p = profiles[userId],
+           let url = URL(string: p.avatarURL)
+        {
             AsyncImage(url: url) { phase in
                 switch phase {
-                case .empty: ProgressView()
+                case .empty:     ProgressView()
                 case .success(let img): img.resizable().scaledToFill()
-                case .failure: Image(systemName: "person.crop.circle.fill").resizable().scaledToFill()
+                case .failure:    Image(systemName: "person.crop.circle.fill").resizable()
                 @unknown default: EmptyView()
                 }
             }
@@ -113,59 +118,30 @@ struct ChatDetailView: View {
         }
     }
 
-    // MARK: – Load profile data
+    private func messageBubble(_ msg: Message, incoming: Bool) -> some View {
+        let txt = msg.text ?? "[Photo]"
+        return Text(txt)
+            .padding(10)
+            .background(incoming
+                        ? Color.gray.opacity(0.2)
+                        : Color.blue.opacity(0.8))
+            .foregroundColor(incoming ? .primary : .white)
+            .cornerRadius(12)
+    }
+
     private func loadProfile(userId: String) {
         guard profiles[userId] == nil else { return }
-        Firestore.firestore()
-            .collection("users")
+        Firestore.firestore().collection("users")
             .document(userId)
             .getDocument { snap, err in
-                guard err == nil, let data = snap?.data() else { return }
-                let name   = data["displayName"] as? String ?? userId
-                let avatar = data["avatarURL"]   as? String ?? ""
+                guard err == nil,
+                      let d = snap?.data()
+                else { return }
+                let name   = d["displayName"] as? String ?? userId
+                let avatar = d["avatarURL"]   as? String ?? ""
                 DispatchQueue.main.async {
                     profiles[userId] = (displayName: name, avatarURL: avatar)
                 }
             }
-    }
-
-    // MARK: – Real‐time listener
-    private func startListening() {
-        listener = NetworkService.shared.observeMessages(chatId: chat.id) { result in
-            switch result {
-            case .success(let msg):
-                DispatchQueue.main.async {
-                    messages.append(msg)
-                }
-            case .failure(let err):
-                print("Msg listener error:", err)
-            }
-        }
-    }
-
-    // MARK: – Send a new message
-    private func send() {
-        let text = newText
-        newText = ""
-        NetworkService.shared.sendMessage(chatId: chat.id, text: text) { error in
-            if let error = error {
-                print("Send error:", error)
-            }
-        }
-    }
-}
-
-struct ChatDetailView_Previews: PreviewProvider {
-    static var previews: some View {
-        NavigationStack {
-            ChatDetailView(
-                chat: Chat(
-                    id: "chat1",
-                    participants: ["u1","u2"],
-                    lastMessage: "Hello",
-                    lastTimestamp: Date()
-                )
-            )
-        }
     }
 }

@@ -1,3 +1,5 @@
+// MessagesView.swift
+
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
@@ -5,66 +7,96 @@ import FirebaseFirestore
 struct MessagesView: View {
     @State private var chats: [Chat] = []
     @State private var isLoading = false
-    // caches other user profiles: userId → (displayName, avatarURL)
+    @State private var errorMessage: String?
+
+    // cache displayName+avatar per userId
     @State private var profiles: [String: (displayName: String, avatarURL: String)] = [:]
 
     var body: some View {
         NavigationView {
-            List(chats) { chat in
-                let otherId = chat.participants.first { $0 != Auth.auth().currentUser?.uid } ?? ""
-                NavigationLink(destination: ChatDetailView(chat: chat)) {
-                    HStack(spacing: 12) {
-                        // avatar
-                        if let profile = profiles[otherId],
-                           let url = URL(string: profile.avatarURL) {
-                            AsyncImage(url: url) { phase in
-                                switch phase {
-                                case .empty: ProgressView()
-                                case .success(let img): img.resizable().scaledToFill()
-                                case .failure: Image(systemName: "person.crop.circle.fill").resizable().scaledToFill()
-                                @unknown default: EmptyView()
-                                }
-                            }
-                            .frame(width: 40, height: 40)
-                            .clipShape(Circle())
-                        } else {
-                            Image(systemName: "person.crop.circle.fill")
-                                .resizable()
-                                .frame(width: 40, height: 40)
-                                .foregroundColor(.gray)
-                                .clipShape(Circle())
-                        }
+            Group {
+                // 1) loading spinner
+                if isLoading {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                        // name + last message
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(profiles[otherId]?.displayName ?? otherId)
-                                .font(.headline)
-                            Text(chat.lastMessage)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
+                // 2) error + retry
+                } else if let error = errorMessage {
+                    VStack(spacing: 16) {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                        Button("Retry") { loadChats(force: true) }
                     }
-                    .contentShape(Rectangle())
-                }
-                .onAppear {
-                    loadProfile(userId: otherId)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // 3) chat list
+                } else {
+                    List(chats) { chat in
+                        let otherId = chat.participants.first { $0 != Auth.auth().currentUser?.uid } ?? ""
+                        NavigationLink(destination: ChatDetailView(chat: chat)) {
+                            HStack(spacing: 12) {
+                                avatarView(userId: otherId)
+                                    .onAppear { loadProfile(userId: otherId) }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(profiles[otherId]?.displayName ?? otherId)
+                                        .font(.headline)
+                                    Text(chat.lastMessage)
+                                        .font(.subheadline)
+                                        .lineLimit(1)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                    }
                 }
             }
             .navigationTitle("Messages")
-            .onAppear(perform: loadChats)
+        }
+        .onAppear { loadChats() }
+    }
+
+    @ViewBuilder
+    private func avatarView(userId: String) -> some View {
+        if let profile = profiles[userId],
+           let url = URL(string: profile.avatarURL)
+        {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .empty:     ProgressView()
+                case .success(let img): img.resizable().scaledToFill()
+                case .failure:    Image(systemName: "person.crop.circle.fill").resizable()
+                @unknown default: EmptyView()
+                }
+            }
+            .frame(width: 40, height: 40)
+            .clipShape(Circle())
+        } else {
+            Image(systemName: "person.crop.circle.fill")
+                .resizable()
+                .frame(width: 40, height: 40)
+                .foregroundColor(.gray)
+                .clipShape(Circle())
         }
     }
 
-    private func loadChats() {
-        guard !isLoading else { return }
+    private func loadChats(force: Bool = false) {
+        guard !isLoading, force || chats.isEmpty else { return }
         isLoading = true
+        errorMessage = nil
+
         NetworkService.shared.fetchChats { result in
             DispatchQueue.main.async {
                 isLoading = false
-                if case .success(let fetched) = result {
-                    chats = fetched
+                switch result {
+                case .success(let fetched):
+                    self.chats = fetched
+                case .failure(let err):
+                    self.errorMessage = err.localizedDescription
                 }
             }
         }
