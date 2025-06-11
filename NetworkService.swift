@@ -1,61 +1,72 @@
-//
-//  NetworkService.swift
+//  Replace file: NetworkService.swift
 //  FitSpo
 //
+//  COMPLETE, up-to-date implementation.
+//
+//  • Adds lowercase helper fields (`username_lc`, `displayName_lc`) when a
+//    profile is first created so search remains fast once you switch back to
+//    server-side prefix queries.
+//  • Introduces simple reachability with `NWPathMonitor` and the static
+//    flag `isOnline`, which `ExploreView` waits on during cold-start.
+//  • Preserves ALL of your existing post / follow / helper methods.
+//
+//  Copy-and-paste this ENTIRE file over the old NetworkService.swift.
 
 import Foundation
-import UIKit
-import FirebaseAuth
 import FirebaseFirestore
+import FirebaseAuth
 import FirebaseStorage
-import Network                                   // for reachability
+import Network            // ← reachability
+import UIKit
 
-/// A singleton to manage all Firebase calls.
+/// Central Firebase + Storage + network helper
 final class NetworkService {
+
+    // MARK: – Shared instance & reachability -----------------------------
     static let shared = NetworkService()
+    private init() { startPathMonitor() }
 
-    /// Live reachability flag (used by ExploreView.reload)
-    public static private(set) var isOnline: Bool = true
-
-    // Firestore & Storage handles — visible to every extension file
-    let db      = Firestore.firestore()
-    let storage = Storage.storage().reference()
-
-    // ------------------------------------------------------------------
-    // MARK:  Init – start a tiny NWPathMonitor so we always know online / offline
-    // ------------------------------------------------------------------
     private let monitor = NWPathMonitor()
+    private let queue   = DispatchQueue(label: "FitSpo.NetMonitor")
+    private var pathStatus: NWPath.Status = .satisfied
 
-    private init() {
-        monitor.pathUpdateHandler = { path in
-            Self.isOnline = (path.status == .satisfied)
+    /// True when the device currently has an internet path.
+    static var isOnline: Bool { shared.pathStatus == .satisfied }
+
+    private func startPathMonitor() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.pathStatus = path.status
         }
-        monitor.start(queue: .global(qos: .background))
+        monitor.start(queue: queue)
     }
 
-    // ==================================================================
-    // MARK:  User profile (adds username_lc)
-    // ==================================================================
-    func createUserProfile(
-        userId: String,
-        data: [String : Any],
-        completion: @escaping (Result<Void,Error>) -> Void
-    ) {
-        var payload = data
-        if payload["username_lc"] == nil,
-           let dn = payload["displayName"] as? String {
-            payload["username_lc"] = dn.lowercased()
+    // MARK: – Firebase handles ------------------------------------------
+    let db      = Firestore.firestore()
+    private let storage = Storage.storage().reference()
+
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Create User Profile
+    // ────────────────────────────────────────────────────────────────────
+    /// Persists a new user doc and writes lowercase helper fields.
+    func createUserProfile(userId: String,
+                           data: [String: Any]) async throws {
+
+        var d = data
+        if let username = data["username"] as? String {
+            d["username_lc"] = username.lowercased()
+        }
+        if let name = data["displayName"] as? String {
+            d["displayName_lc"] = name.lowercased()
         }
 
-        db.collection("users").document(userId).setData(payload) { err in
-            if let err { completion(.failure(err)) }
-            else       { completion(.success(()))  }
-        }
+        try await db.collection("users")
+            .document(userId)
+            .setData(d)
     }
 
-    // ==================================================================
-    // MARK:  Upload post (stores hashtags[])
-    // ==================================================================
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Upload Post (stores hashtags[])
+    // ────────────────────────────────────────────────────────────────────
     func uploadPost(
         image: UIImage,
         caption: String,
@@ -63,7 +74,7 @@ final class NetworkService {
         longitude: Double?,
         completion: @escaping (Result<Void,Error>) -> Void
     ) {
-        guard let me   = Auth.auth().currentUser else {
+        guard let me = Auth.auth().currentUser else {
             return completion(.failure(Self.authError()))
         }
         guard let jpeg = image.jpegData(compressionQuality: 0.8) else {
@@ -94,32 +105,31 @@ final class NetworkService {
                 if let latitude  { post["latitude"]  = latitude  }
                 if let longitude { post["longitude"] = longitude }
 
-                self?.db.collection("posts").addDocument(data: post) { err in
-                    if let err { completion(.failure(err)) }
-                    else       { completion(.success(()))  }
-                }
+                self?.db.collection("posts")
+                    .addDocument(data: post) { err in
+                        err == nil ? completion(.success(()))
+                                   : completion(.failure(err!))
+                    }
             }
         }
     }
 
-    // ==================================================================
-    // MARK:  Fetch posts (home feed)
-    // ==================================================================
-    func fetchPosts(
-        completion: @escaping (Result<[Post],Error>) -> Void
-    ) {
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Fetch Posts (home feed)
+    // ────────────────────────────────────────────────────────────────────
+    func fetchPosts(completion: @escaping (Result<[Post],Error>) -> Void) {
         db.collection("posts")
           .order(by: "timestamp", descending: true)
           .getDocuments { snap, err in
-              if let err { return completion(.failure(err)) }
+              if let err { completion(.failure(err)); return }
               let posts = snap?.documents.compactMap(Self.decodePost) ?? []
               completion(.success(posts))
           }
     }
 
-    // ==================================================================
-    // MARK:  Toggle like
-    // ==================================================================
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Toggle Like
+    // ────────────────────────────────────────────────────────────────────
     func toggleLike(post: Post,
                     completion: @escaping (Result<Post,Error>) -> Void) {
         let ref      = db.collection("posts").document(post.id)
@@ -139,21 +149,19 @@ final class NetworkService {
         }
     }
 
-    // ==================================================================
-    // MARK:  Delete post (doc + Storage asset)
-    // ==================================================================
-    func deletePost(
-        id: String,
-        completion: @escaping (Result<Void,Error>) -> Void
-    ) {
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Delete Post (Firestore doc + Storage asset)
+    // ────────────────────────────────────────────────────────────────────
+    func deletePost(id: String,
+                    completion: @escaping (Result<Void,Error>) -> Void) {
         let ref = db.collection("posts").document(id)
         ref.getDocument { snap, err in
             if let err { return completion(.failure(err)) }
 
-            guard
-                let d   = snap?.data(),
-                let url = URL(string: d["imageURL"] as? String ?? "")
-            else {
+            guard let d  = snap?.data(),
+                  let str = d["imageURL"] as? String,
+                  let url = URL(string: str)
+            else {                                  // no image URL → delete doc only
                 ref.delete { err in
                     err == nil ? completion(.success(()))
                                : completion(.failure(err!))
@@ -172,16 +180,16 @@ final class NetworkService {
         }
     }
 
-    // ==================================================================
-    // MARK:  Follow / unfollow / counts
-    // ==================================================================
+    // ────────────────────────────────────────────────────────────────────
+    // MARK:  Follow / Unfollow / Counts
+    // ────────────────────────────────────────────────────────────────────
     func follow(userId: String, completion: @escaping (Error?) -> Void) {
         guard let me = Auth.auth().currentUser?.uid else {
             return completion(Self.authError())
         }
         let batch = db.batch()
-        let follower = db.collection("users").document(userId)
-                         .collection("followers").document(me)
+        let follower  = db.collection("users").document(userId)
+                          .collection("followers").document(me)
         let following = db.collection("users").document(me)
                           .collection("following").document(userId)
         batch.setData([:], forDocument: follower)
@@ -194,8 +202,8 @@ final class NetworkService {
             return completion(Self.authError())
         }
         let batch = db.batch()
-        let follower = db.collection("users").document(userId)
-                         .collection("followers").document(me)
+        let follower  = db.collection("users").document(userId)
+                          .collection("followers").document(me)
         let following = db.collection("users").document(me)
                           .collection("following").document(userId)
         batch.deleteDocument(follower)

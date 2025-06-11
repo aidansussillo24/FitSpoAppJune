@@ -1,3 +1,9 @@
+//  Replace file: MainTabView.swift
+//  FitSpo
+//
+//  Updates the Profile tab to call `ProfileView()` with no arguments
+//  (ProfileView now defaults to the current user internally).
+
 import SwiftUI
 import FirebaseAuth
 
@@ -5,35 +11,21 @@ struct MainTabView: View {
     var body: some View {
         TabView {
             HomeView()
-                .tabItem {
-                    Label("Home", systemImage: "house")
-                }
+                .tabItem { Label("Home", systemImage: "house") }
 
             ExploreView()
-                .tabItem {
-                    Label("Explore", systemImage: "magnifyingglass")
-                }
+                .tabItem { Label("Explore", systemImage: "magnifyingglass") }
 
             NewPostView()
-                .tabItem {
-                    Label("Post", systemImage: "plus.app")
-                }
+                .tabItem { Label("Post", systemImage: "plus.app") }
 
             MapView()
-                .tabItem {
-                    Label("Map", systemImage: "map")
-                }
+                .tabItem { Label("Map", systemImage: "map") }
 
-            ProfileView(userId: Auth.auth().currentUser?.uid ?? "")
-                .tabItem {
-                    Label("Profile", systemImage: "person.crop.circle")
-                }
+            ProfileView()              // ← no arguments needed
+                .tabItem { Label("Profile", systemImage: "person.crop.circle") }
         }
     }
 }
 
-struct MainTabView_Previews: PreviewProvider {
-    static var previews: some View {
-        MainTabView()
-    }
-}
+//  End of file
