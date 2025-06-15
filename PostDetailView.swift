@@ -2,52 +2,71 @@
 //  PostDetailView.swift
 //  FitSpo
 //
+//  Displays one post – image, likes, comments – plus Outfit‑AI scan results.
+//
 
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import CoreLocation
+import UIKit                          // ZoomableAsyncImage
 
+// ─────────────────────────────────────────────────────────────
 struct PostDetailView: View {
+
+    // MARK: – injected model
     let post: Post
     @Environment(\.dismiss) private var dismiss
 
-    // ── Author info ─────────────────────────
+    // MARK: – author info
     @State private var authorName      = ""
     @State private var authorAvatarURL = ""
     @State private var isLoadingAuthor = true
 
-    // ── Location ───────────────────────────
-    @State private var locationName    = ""
+    // MARK: – location chip
+    @State private var locationName = ""
 
-    // ── Like state ─────────────────────────
-    @State private var isLiked    : Bool
-    @State private var likesCount : Int
+    // MARK: – like state
+    @State private var isLiked: Bool
+    @State private var likesCount: Int
     @State private var showHeartBurst = false
 
-    // ── Comment state ──────────────────────
-    @State private var commentCount : Int = 0
+    // MARK: – comments state
+    @State private var commentCount: Int = 0
     @State private var showComments = false
 
-    // ── Misc. ──────────────────────────────
-    @State private var isDeleting        = false
-    @State private var showDeleteConfirm = false
-    @State private var showShareSheet    = false
+    // MARK: – share / chat state
+    @State private var showShareSheet = false
     @State private var shareChat: Chat?
     @State private var navigateToChat = false
 
-    // live doc listener
-    @State private var postListener: ListenerRegistration?
+    // MARK: – delete UX state
+    @State private var isDeleting        = false
+    @State private var showDeleteConfirm = false
 
+    // MARK: – outfit‑scan state
+    @State private var isScanning      = false
+    @State private var outfitItems     : [OutfitItem] = []
+    @State private var showOutfitSheet = false
+
+    // MARK: – other state
+    @State private var postListener: ListenerRegistration?
+    @State private var imgRatio: CGFloat? = nil
+    @State private var postTags: [UserTag] = []
+
+    // MARK: – init
     init(post: Post) {
         self.post = post
         _isLiked    = State(initialValue: post.isLiked)
         _likesCount = State(initialValue: post.likes)
     }
 
-    // MARK: — Body ----------------------------------------------------------
+    // =========================================================
+    // MARK: body
+    // =========================================================
     var body: some View {
         ZStack(alignment: .bottom) {
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     header
@@ -60,12 +79,11 @@ struct PostDetailView: View {
                 .padding(.top)
             }
 
-            // ── Comments overlay ──
             if showComments {
                 CommentsOverlay(
                     post: post,
                     isPresented: $showComments,
-                    onCommentCountChange: { commentCount = $0 }   // live update
+                    onCommentCountChange: { commentCount = $0 }
                 )
                 .transition(.move(edge: .bottom))
             }
@@ -73,62 +91,32 @@ struct PostDetailView: View {
         .animation(.easeInOut, value: showComments)
         .navigationTitle("Post")
         .navigationBarTitleDisplayMode(.inline)
-
-        // delete button for owner
-        .toolbar {
-            if post.userId == Auth.auth().currentUser?.uid {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Delete", role: .destructive) { showDeleteConfirm = true }
-                }
-            }
-        }
-        .alert("Delete Post?", isPresented: $showDeleteConfirm) {
-            Button("Delete", role: .destructive, action: performDelete)
-            Button("Cancel", role: .cancel) {}
-        }
-        .overlay {
-            if isDeleting {
-                ProgressView("Deleting…")
-                    .padding()
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
-        .sheet(isPresented: $showShareSheet) {
-            ShareToUserView { selectedUserId in
-                showShareSheet = false
-                sharePost(to: selectedUserId)
-            }
-        }
-        .background(
-            Group {
-                if let chat = shareChat {
-                    NavigationLink(
-                        destination: ChatDetailView(chat: chat),
-                        isActive: $navigateToChat
-                    ) { EmptyView() }
-                    .hidden()
-                }
-            }
-        )
-        .onAppear {
-            attachPostListener()   // live likes & commentCount
-            fetchAuthor()
-            fetchLocationName()
-            fetchCommentCount()    // ← ensures 💬 count is right on first load
-        }
-        .onDisappear { postListener?.remove() }
+        .toolbar { toolbarDeleteButton }
+        .alert("Delete Post?", isPresented: $showDeleteConfirm,
+               actions: deleteAlertButtons)
+        .overlay { if isDeleting { deletingOverlay } }
+        .sheet(isPresented: $showShareSheet)  { shareSheet }
+        .sheet(isPresented: $showOutfitSheet) { outfitSheet }
+        .background { chatNavigationLink }
+        .onAppear   { attachListenersAndFetch() }
+        .onDisappear{ postListener?.remove() }
     }
 
-    // MARK: — Subviews ------------------------------------------------------
+    // MARK: ----------------------------------------------------
+    // MARK: sub‑views
+    // MARK: ----------------------------------------------------
 
+    // HEADER
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
             NavigationLink(destination: ProfileView(userId: post.userId)) {
                 avatarView
             }
+
             VStack(alignment: .leading, spacing: 4) {
                 NavigationLink(destination: ProfileView(userId: post.userId)) {
-                    Text(isLoadingAuthor ? "Loading…" : authorName).font(.headline)
+                    Text(isLoadingAuthor ? "Loading…" : authorName)
+                        .font(.headline)
                 }
                 if !locationName.isEmpty {
                     Text(locationName)
@@ -141,63 +129,70 @@ struct PostDetailView: View {
         .padding(.horizontal)
     }
 
+    // MAIN IMAGE
     private var postImage: some View {
-        ZStack {
-            AsyncImage(url: URL(string: post.imageURL)) { phase in
-                switch phase {
-                case .empty:
-                    ZStack { Color.gray.opacity(0.2); ProgressView() }
-                case .success(let img):
-                    img.resizable().scaledToFit()
-                case .failure:
-                    ZStack {
-                        Color.gray.opacity(0.2)
-                        Image(systemName: "photo")
-                            .font(.largeTitle)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                @unknown default: EmptyView()
+        GeometryReader { geo in
+            if let url = URL(string: post.imageURL) {
+                ZoomableAsyncImage(url: url, aspectRatio: $imgRatio)
+                    .frame(width: geo.size.width,
+                           height: (imgRatio ?? 1) * geo.size.width)
+                    .clipped()
+                    .simultaneousGesture(
+                        TapGesture(count: 2).onEnded { handleDoubleTapLike() }
+                    )
+                    .overlay(HeartBurstView(trigger: $showHeartBurst))
+                    .overlay(
+                        ForEach(postTags) { tag in
+                            NavigationLink(
+                                destination: ProfileView(userId: tag.id)
+                            ) {
+                                Text(tag.displayName)
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(6)
+                                    .background(.thinMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .position(
+                                x: tag.xNorm * geo.size.width,
+                                y: tag.yNorm * geo.size.width * (imgRatio ?? 1)
+                            )
+                        }
+                    )
+            } else {
+                ZStack {
+                    Color.gray.opacity(0.2)
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundColor(.white.opacity(0.7))
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(
-                TapGesture(count: 2).onEnded { handleDoubleTapLike() }
-            )
-
-            Image(systemName: "heart.fill")
-                .resizable()
-                .foregroundColor(.white)
-                .frame(width: 100, height: 100)
-                .opacity(showHeartBurst ? 1 : 0)
-                .scaleEffect(showHeartBurst ? 1 : 0.3)
-                .animation(.easeOut(duration: 0.35), value: showHeartBurst)
         }
-        .frame(maxWidth: .infinity)
-        .clipped()
+        .frame(height: UIScreen.main.bounds.width * (imgRatio ?? 1))
     }
 
+    // ACTION ROW   ← hanger button changed
     private var actionRow: some View {
         HStack(spacing: 24) {
-            Button(action: toggleLike) {
-                Image(systemName: isLiked ? "heart.fill" : "heart")
-                    .font(.title2)
-                    .foregroundColor(isLiked ? .red : .primary)
-            }
+            likeButton
             Text("\(likesCount)")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+                .font(.subheadline.weight(.semibold))
 
-            Button { showComments = true } label: {
-                Image(systemName: "bubble.right").font(.title2)
-            }
+            commentButton
             Text("\(commentCount)")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+                .font(.subheadline.weight(.semibold))
 
-            Button { showShareSheet = true } label: {
-                Image(systemName: "paperplane").font(.title2)
+            // ----------------------------------------
+            Button {
+                showOutfitSheet = true      // open sheet first
+                scanOutfit()                // then start scan
+            } label: {
+                Image(systemName: "hanger")
+                    .font(.title2)
             }
+            .disabled(isScanning)           // greyed‑out while running
+            // ----------------------------------------
 
+            shareButton
             Spacer()
         }
         .padding(.horizontal)
@@ -221,16 +216,16 @@ struct PostDetailView: View {
             .padding(.horizontal)
     }
 
-    @ViewBuilder
-    private var avatarView: some View {
+    @ViewBuilder private var avatarView: some View {
         Group {
-            if let url = URL(string: authorAvatarURL), !authorAvatarURL.isEmpty {
+            if let url = URL(string: authorAvatarURL),
+               !authorAvatarURL.isEmpty {
                 AsyncImage(url: url) { phase in
                     switch phase {
-                    case .empty: ProgressView()
-                    case .success(let img): img.resizable().scaledToFill()
-                    case .failure: Image(systemName: "person.crop.circle.fill").resizable()
-                    @unknown default: EmptyView()
+                    case .empty:   ProgressView()
+                    case .success: phase.image!.resizable().scaledToFill()
+                    default:       Image(systemName: "person.crop.circle.fill")
+                                    .resizable()
                     }
                 }
             } else {
@@ -243,51 +238,86 @@ struct PostDetailView: View {
         .clipShape(Circle())
     }
 
-    // MARK: — Live Firestore listener --------------------------------------
+    // MARK: ----------------------------------------------------
+    // MARK: toolbar, alerts, overlays, sheets
+    // MARK: ----------------------------------------------------
+
+    private var toolbarDeleteButton: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            if post.userId == Auth.auth().currentUser?.uid {
+                Button("Delete", role: .destructive) {
+                    showDeleteConfirm = true
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func deleteAlertButtons() -> some View {
+        Button("Delete", role: .destructive, action: performDelete)
+        Button("Cancel",  role: .cancel) { }
+    }
+
+    private var deletingOverlay: some View {
+        ProgressView("Deleting…")
+            .padding()
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var shareSheet: some View {
+        ShareToUserView { uid in
+            showShareSheet = false
+            sharePost(to: uid)
+        }
+    }
+
+    private var outfitSheet: some View {
+        OutfitItemSheet(
+            items: outfitItems,
+            isScanning: isScanning,
+            isPresented: $showOutfitSheet
+        )
+        .presentationDetents([.fraction(0.45), .large])
+    }
+
+    private var chatNavigationLink: some View {
+        Group {
+            if let chat = shareChat {
+                NavigationLink(destination: ChatDetailView(chat: chat),
+                               isActive: $navigateToChat) { EmptyView() }
+                    .hidden()
+            }
+        }
+    }
+
+    // MARK: ----------------------------------------------------
+    // MARK: Firestore & helpers
+    // MARK: ----------------------------------------------------
+
+    private func attachListenersAndFetch() {
+        attachPostListener()
+        fetchAuthor()
+        fetchLocationName()
+        fetchCommentCount()
+        fetchTags()
+    }
 
     private func attachPostListener() {
         guard postListener == nil else { return }
-        let doc = Firestore.firestore().collection("posts").document(post.id)
-        postListener = doc.addSnapshotListener { snap, _ in
-            guard let d = snap?.data() else { return }
-            likesCount   = d["likes"] as? Int ?? likesCount
-            commentCount = d["commentsCount"] as? Int ?? commentCount
-            if let likedBy = d["likedBy"] as? [String],
-               let uid = Auth.auth().currentUser?.uid {
-                isLiked = likedBy.contains(uid)
+        Firestore.firestore().collection("posts").document(post.id)
+            .addSnapshotListener { snap, _ in
+                guard let d = snap?.data() else { return }
+                likesCount   = d["likes"] as? Int ?? likesCount
+                commentCount = d["commentsCount"] as? Int ?? commentCount
+                if let likedBy = d["likedBy"] as? [String],
+                   let uid = Auth.auth().currentUser?.uid {
+                    isLiked = likedBy.contains(uid)
+                }
             }
-        }
     }
-
-    // MARK: — Actions -------------------------------------------------------
-
-    private func toggleLike() {
-        isLiked.toggle()
-        likesCount += isLiked ? 1 : -1
-        NetworkService.shared.toggleLike(post: post) { _ in }
-    }
-
-    private func handleDoubleTapLike() {
-        showHeartBurst = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showHeartBurst = false }
-        if !isLiked { toggleLike() }
-    }
-
-    private func performDelete() {
-        isDeleting = true
-        NetworkService.shared.deletePost(id: post.id) { result in
-            DispatchQueue.main.async {
-                isDeleting = false
-                if case .success = result { dismiss() }
-            }
-        }
-    }
-
-    // MARK: — Data fetch helpers -------------------------------------------
 
     private func fetchAuthor() {
-        Firestore.firestore()
-            .collection("users").document(post.userId)
+        Firestore.firestore().collection("users")
+            .document(post.userId)
             .getDocument { snap, _ in
                 isLoadingAuthor = false
                 let d = snap?.data() ?? [:]
@@ -298,12 +328,13 @@ struct PostDetailView: View {
 
     private func fetchLocationName() {
         guard let lat = post.latitude, let lon = post.longitude else { return }
-        let loc = CLLocation(latitude: lat, longitude: lon)
-        CLGeocoder().reverseGeocodeLocation(loc) { places, _ in
+        CLGeocoder().reverseGeocodeLocation(
+            CLLocation(latitude: lat, longitude: lon)
+        ) { places, _ in
             guard let p = places?.first else { return }
             var parts = [String]()
-            if let city   = p.locality             { parts.append(city) }
-            if let region = p.administrativeArea   { parts.append(region) }
+            if let city   = p.locality           { parts.append(city) }
+            if let region = p.administrativeArea { parts.append(region) }
             if parts.isEmpty, let country = p.country { parts.append(country) }
             locationName = parts.joined(separator: ", ")
         }
@@ -315,7 +346,40 @@ struct PostDetailView: View {
         }
     }
 
-    // MARK: — Share helper --------------------------------------------------
+    private func fetchTags() {
+        NetworkService.shared.fetchTags(for: post.id) { res in
+            if case .success(let list) = res { postTags = list }
+        }
+    }
+
+    // MARK: ----------------------------------------------------
+    // MARK: post actions
+    // MARK: ----------------------------------------------------
+
+    private func toggleLike() {
+        isLiked.toggle()
+        likesCount += isLiked ? 1 : -1
+        NetworkService.shared.toggleLike(post: post) { _ in }
+    }
+
+    private func handleDoubleTapLike() {
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        showHeartBurst = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            showHeartBurst = false
+        }
+        if !isLiked { toggleLike() }
+    }
+
+    private func performDelete() {
+        isDeleting = true
+        NetworkService.shared.deletePost(id: post.id) { res in
+            DispatchQueue.main.async {
+                isDeleting = false
+                if case .success = res { dismiss() }
+            }
+        }
+    }
 
     private func sharePost(to userId: String) {
         guard let me = Auth.auth().currentUser?.uid else { return }
@@ -323,11 +387,83 @@ struct PostDetailView: View {
         NetworkService.shared.createChat(participants: pair) { res in
             switch res {
             case .success(let chat):
-                NetworkService.shared.sendPost(chatId: chat.id, postId: post.id) { _ in }
-                DispatchQueue.main.async { shareChat = chat; navigateToChat = true }
+                NetworkService.shared.sendPost(
+                    chatId: chat.id,
+                    postId: post.id
+                ) { _ in }
+                DispatchQueue.main.async {
+                    shareChat = chat
+                    navigateToChat = true
+                }
             case .failure(let err):
                 print("Chat creation error:", err)
             }
+        }
+    }
+
+    // =========================================================
+    // MARK: Outfit‑AI scan (updated)
+    // =========================================================
+    @MainActor
+    private func scanOutfit() {
+        guard !isScanning else { return }      // prevents accidental double‑tap
+        isScanning  = true
+        outfitItems = []
+
+        Task {
+            defer { isScanning = false }
+            do {
+                // ① kick off Cloud Function
+                let initial = try await NetworkService.scanOutfit(
+                    postId:   post.id,
+                    imageURL: post.imageURL
+                )
+
+                // ② poll until Replicate finishes
+                let final = try await NetworkService.waitForReplicate(prediction: initial)
+
+                // ③ map detections → view‑model
+                let objects = final.output?.json_data.objects ?? []
+                outfitItems = objects.enumerated().map { idx, det in
+                    OutfitItem(
+                        id: "d\(idx)",
+                        label: det.name,
+                        brand: "",
+                        shopURL: "https://www.google.com/search?q="
+                               + det.name.addingPercentEncoding(
+                                   withAllowedCharacters: .urlQueryAllowed
+                                 )!
+                    )
+                }
+
+            } catch {
+                print("Outfit scan failed:", error)
+                outfitItems = []            // show “No items detected”
+            }
+        }
+    }
+
+    // MARK: ----------------------------------------------------
+    // MARK: buttons
+    // MARK: ----------------------------------------------------
+
+    private var likeButton: some View {
+        Button(action: toggleLike) {
+            Image(systemName: isLiked ? "heart.fill" : "heart")
+                .font(.title2)
+                .foregroundColor(isLiked ? .red : .primary)
+        }
+    }
+
+    private var commentButton: some View {
+        Button { showComments = true } label: {
+            Image(systemName: "bubble.right").font(.title2)
+        }
+    }
+
+    private var shareButton: some View {
+        Button { showShareSheet = true } label: {
+            Image(systemName: "paperplane").font(.title2)
         }
     }
 }
