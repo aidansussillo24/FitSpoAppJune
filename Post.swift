@@ -22,7 +22,11 @@ struct Post: Identifiable, Codable {
     let longitude: Double?
     var  temp:     Double?
 
-    // ── NEW 2.3 — hashtags array (lower-cased, no “#”) ─────────
+    // ── NEW ▶︎ outfit‑scan payload ─────────────────────────────
+    /// Nil until the Cloud Function finishes; then cached forever.
+    var outfitItems: [OutfitItem]? = nil
+
+    // ── Hashtags array (lower‑cased, no “#”) ───────────────────
     var hashtags: [String]
 
     // Convenience for MapKit
@@ -33,6 +37,6 @@ struct Post: Identifiable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, userId, imageURL, caption, timestamp, likes, isLiked
-        case latitude, longitude, temp, hashtags
+        case latitude, longitude, temp, hashtags, outfitItems
     }
 }

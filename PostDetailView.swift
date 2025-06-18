@@ -2,14 +2,19 @@
 //  PostDetailView.swift
 //  FitSpo
 //
-//  Displays one post – image, likes, comments – plus Outfit‑AI scan results.
+//  Displays one post (image, likes, comments) + cached outfit scan.
+//
+//  Updated 2025‑06‑18:
+//  • State `outfitItems` no longer initialises to an empty array
+//    – it’s filled with the cached items coming from Firestore.
+//  • `init(post:)` seed updated field.
 //
 
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import CoreLocation
-import UIKit                          // ZoomableAsyncImage
+import UIKit        // ZoomableAsyncImage
 
 // ─────────────────────────────────────────────────────────────
 struct PostDetailView: View {
@@ -40,16 +45,16 @@ struct PostDetailView: View {
     @State private var shareChat: Chat?
     @State private var navigateToChat = false
 
-    // MARK: – delete UX state
+    // MARK: – delete UX
     @State private var isDeleting        = false
     @State private var showDeleteConfirm = false
 
-    // MARK: – outfit‑scan state
+    // MARK: – outfit‑scan sheet
     @State private var isScanning      = false
-    @State private var outfitItems     : [OutfitItem] = []
+    @State private var outfitItems     : [OutfitItem]
     @State private var showOutfitSheet = false
 
-    // MARK: – other state
+    // MARK: – misc
     @State private var postListener: ListenerRegistration?
     @State private var imgRatio: CGFloat? = nil
     @State private var postTags: [UserTag] = []
@@ -57,8 +62,9 @@ struct PostDetailView: View {
     // MARK: – init
     init(post: Post) {
         self.post = post
-        _isLiked    = State(initialValue: post.isLiked)
-        _likesCount = State(initialValue: post.likes)
+        _isLiked       = State(initialValue: post.isLiked)
+        _likesCount    = State(initialValue: post.likes)
+        _outfitItems   = State(initialValue: post.outfitItems ?? [])
     }
 
     // =========================================================
@@ -170,7 +176,7 @@ struct PostDetailView: View {
         .frame(height: UIScreen.main.bounds.width * (imgRatio ?? 1))
     }
 
-    // ACTION ROW   ← hanger button changed
+    // ACTION ROW  (includes hanger button)
     private var actionRow: some View {
         HStack(spacing: 24) {
             likeButton
@@ -181,16 +187,15 @@ struct PostDetailView: View {
             Text("\(commentCount)")
                 .font(.subheadline.weight(.semibold))
 
-            // ----------------------------------------
+            // hanger → opens sheet and (optionally) triggers scan
             Button {
-                showOutfitSheet = true      // open sheet first
-                scanOutfit()                // then start scan
+                showOutfitSheet = true
+                if outfitItems.isEmpty { scanOutfit() }
             } label: {
                 Image(systemName: "hanger")
                     .font(.title2)
             }
-            .disabled(isScanning)           // greyed‑out while running
-            // ----------------------------------------
+            .disabled(isScanning)
 
             shareButton
             Spacer()
@@ -238,8 +243,111 @@ struct PostDetailView: View {
         .clipShape(Circle())
     }
 
+    // MARK: – buttons
+    private var likeButton: some View {
+        Button(action: toggleLike) {
+            Image(systemName: isLiked ? "heart.fill" : "heart")
+                .font(.title2)
+                .foregroundColor(isLiked ? .red : .primary)
+        }
+    }
+
+    private var commentButton: some View {
+        Button { showComments = true } label: {
+            Image(systemName: "bubble.right").font(.title2)
+        }
+    }
+
+    private var shareButton: some View {
+        Button { showShareSheet = true } label: {
+            Image(systemName: "paperplane").font(.title2)
+        }
+    }
+
     // MARK: ----------------------------------------------------
-    // MARK: toolbar, alerts, overlays, sheets
+    // MARK: post actions
+    // MARK: ----------------------------------------------------
+
+    private func toggleLike() {
+        isLiked.toggle()
+        likesCount += isLiked ? 1 : -1
+        NetworkService.shared.toggleLike(post: post) { _ in }
+    }
+
+    private func handleDoubleTapLike() {
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        showHeartBurst = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            showHeartBurst = false
+        }
+        if !isLiked { toggleLike() }
+    }
+
+    private func performDelete() {
+        isDeleting = true
+        NetworkService.shared.deletePost(id: post.id) { res in
+            DispatchQueue.main.async {
+                isDeleting = false
+                if case .success = res { dismiss() }
+            }
+        }
+    }
+
+    private func sharePost(to userId: String) {
+        guard let me = Auth.auth().currentUser?.uid else { return }
+        let pair = [me, userId].sorted()
+        NetworkService.shared.createChat(participants: pair) { res in
+            switch res {
+            case .success(let chat):
+                NetworkService.shared.sendPost(chatId: chat.id, postId: post.id) { _ in }
+                DispatchQueue.main.async {
+                    shareChat = chat
+                    navigateToChat = true
+                }
+            case .failure(let err):
+                print("Chat creation error:", err)
+            }
+        }
+    }
+
+    // =========================================================
+    // MARK: Outfit‑AI scan helper
+    // =========================================================
+    @MainActor
+    private func scanOutfit() {
+        guard !isScanning else { return }
+        isScanning  = true
+        outfitItems = []
+
+        Task {
+            defer { isScanning = false }
+            do {
+                let start = try await NetworkService.scanOutfit(
+                    postId:   post.id,
+                    imageURL: post.imageURL
+                )
+                let fin = try await NetworkService.waitForReplicate(prediction: start)
+                let objs = fin.output?.json_data.objects ?? []
+                outfitItems = objs.enumerated().map { idx, det in
+                    OutfitItem(
+                        id: "d\(idx)",
+                        label: det.name,
+                        brand: "",
+                        shopURL: "https://www.google.com/search?q="
+                               + det.name.addingPercentEncoding(
+                                   withAllowedCharacters: .urlQueryAllowed
+                                 )!
+                    )
+                }
+            } catch {
+                print("Outfit scan failed:", error)
+                outfitItems = []
+            }
+        }
+    }
+
+    // MARK: ----------------------------------------------------
+    // MARK: toolbar & sheets
     // MARK: ----------------------------------------------------
 
     private var toolbarDeleteButton: some ToolbarContent {
@@ -351,119 +459,5 @@ struct PostDetailView: View {
             if case .success(let list) = res { postTags = list }
         }
     }
-
-    // MARK: ----------------------------------------------------
-    // MARK: post actions
-    // MARK: ----------------------------------------------------
-
-    private func toggleLike() {
-        isLiked.toggle()
-        likesCount += isLiked ? 1 : -1
-        NetworkService.shared.toggleLike(post: post) { _ in }
-    }
-
-    private func handleDoubleTapLike() {
-        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-        showHeartBurst = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            showHeartBurst = false
-        }
-        if !isLiked { toggleLike() }
-    }
-
-    private func performDelete() {
-        isDeleting = true
-        NetworkService.shared.deletePost(id: post.id) { res in
-            DispatchQueue.main.async {
-                isDeleting = false
-                if case .success = res { dismiss() }
-            }
-        }
-    }
-
-    private func sharePost(to userId: String) {
-        guard let me = Auth.auth().currentUser?.uid else { return }
-        let pair = [me, userId].sorted()
-        NetworkService.shared.createChat(participants: pair) { res in
-            switch res {
-            case .success(let chat):
-                NetworkService.shared.sendPost(
-                    chatId: chat.id,
-                    postId: post.id
-                ) { _ in }
-                DispatchQueue.main.async {
-                    shareChat = chat
-                    navigateToChat = true
-                }
-            case .failure(let err):
-                print("Chat creation error:", err)
-            }
-        }
-    }
-
-    // =========================================================
-    // MARK: Outfit‑AI scan (updated)
-    // =========================================================
-    @MainActor
-    private func scanOutfit() {
-        guard !isScanning else { return }      // prevents accidental double‑tap
-        isScanning  = true
-        outfitItems = []
-
-        Task {
-            defer { isScanning = false }
-            do {
-                // ① kick off Cloud Function
-                let initial = try await NetworkService.scanOutfit(
-                    postId:   post.id,
-                    imageURL: post.imageURL
-                )
-
-                // ② poll until Replicate finishes
-                let final = try await NetworkService.waitForReplicate(prediction: initial)
-
-                // ③ map detections → view‑model
-                let objects = final.output?.json_data.objects ?? []
-                outfitItems = objects.enumerated().map { idx, det in
-                    OutfitItem(
-                        id: "d\(idx)",
-                        label: det.name,
-                        brand: "",
-                        shopURL: "https://www.google.com/search?q="
-                               + det.name.addingPercentEncoding(
-                                   withAllowedCharacters: .urlQueryAllowed
-                                 )!
-                    )
-                }
-
-            } catch {
-                print("Outfit scan failed:", error)
-                outfitItems = []            // show “No items detected”
-            }
-        }
-    }
-
-    // MARK: ----------------------------------------------------
-    // MARK: buttons
-    // MARK: ----------------------------------------------------
-
-    private var likeButton: some View {
-        Button(action: toggleLike) {
-            Image(systemName: isLiked ? "heart.fill" : "heart")
-                .font(.title2)
-                .foregroundColor(isLiked ? .red : .primary)
-        }
-    }
-
-    private var commentButton: some View {
-        Button { showComments = true } label: {
-            Image(systemName: "bubble.right").font(.title2)
-        }
-    }
-
-    private var shareButton: some View {
-        Button { showShareSheet = true } label: {
-            Image(systemName: "paperplane").font(.title2)
-        }
-    }
 }
+//  End of PostDetailView.swift
