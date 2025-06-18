@@ -2,12 +2,11 @@
 //  PostDetailView.swift
 //  FitSpo
 //
-//  Displays one post (image, likes, comments) + cached outfit scan.
+//  Displays one post (image, likes, comments) plus cached outfit scan.
 //
-//  Updated 2025‑06‑18:
-//  • State `outfitItems` no longer initialises to an empty array
-//    – it’s filled with the cached items coming from Firestore.
-//  • `init(post:)` seed updated field.
+//  Updated 2025‑06‑18 (Real‑time outfit updates):
+//  • attachPostListener() now listens for the `scanResults` array and
+//    repopulates `outfitItems` as soon as the Cloud Function finishes.
 //
 
 import SwiftUI
@@ -187,7 +186,7 @@ struct PostDetailView: View {
             Text("\(commentCount)")
                 .font(.subheadline.weight(.semibold))
 
-            // hanger → opens sheet and (optionally) triggers scan
+            // hanger → opens sheet; will auto‑populate now
             Button {
                 showOutfitSheet = true
                 if outfitItems.isEmpty { scanOutfit() }
@@ -409,16 +408,37 @@ struct PostDetailView: View {
         fetchTags()
     }
 
+    /// Listener now also updates `outfitItems` when scanResults becomes available.
     private func attachPostListener() {
         guard postListener == nil else { return }
-        Firestore.firestore().collection("posts").document(post.id)
+        postListener = Firestore.firestore()
+            .collection("posts")
+            .document(post.id)
             .addSnapshotListener { snap, _ in
                 guard let d = snap?.data() else { return }
+
                 likesCount   = d["likes"] as? Int ?? likesCount
                 commentCount = d["commentsCount"] as? Int ?? commentCount
+
                 if let likedBy = d["likedBy"] as? [String],
                    let uid = Auth.auth().currentUser?.uid {
                     isLiked = likedBy.contains(uid)
+                }
+
+                // NEW – parse scanResults in real time
+                if let raw = d["scanResults"] as? [[String:Any]] {
+                    let parsed: [OutfitItem] = raw.compactMap { dict in
+                        guard
+                            let label = dict["label"]   as? String,
+                            let shop  = dict["shopURL"] as? String
+                        else { return nil }
+                        let brand = dict["brand"] as? String ?? ""
+                        return OutfitItem(id: UUID().uuidString,
+                                          label: label,
+                                          brand: brand,
+                                          shopURL: shop)
+                    }
+                    if !parsed.isEmpty { outfitItems = parsed }
                 }
             }
     }
