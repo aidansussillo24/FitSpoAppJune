@@ -3,10 +3,13 @@
 //  FitSpo
 //
 //  Displays one post (image, likes, comments) plus cached outfit scan.
+//  Now also lets the viewer **report** the post via a sheet.
 //
-//  Updated 2025‑06‑18 (Real‑time outfit updates):
-//  • attachPostListener() now listens for the `scanResults` array and
-//    repopulates `outfitItems` as soon as the Cloud Function finishes.
+//  Updated 2025‑06‑19:
+//  • Added a “More” (ellipsis) toolbar menu for non‑owners
+//    with a “Report” action.
+//  • Presents `ReportSheetView`, which calls
+//    `NetworkService.shared.submitReport(…)`.
 //
 
 import SwiftUI
@@ -53,6 +56,9 @@ struct PostDetailView: View {
     @State private var outfitItems     : [OutfitItem]
     @State private var showOutfitSheet = false
 
+    // MARK: – NEW ▶︎ report sheet
+    @State private var showReportSheet = false
+
     // MARK: – misc
     @State private var postListener: ListenerRegistration?
     @State private var imgRatio: CGFloat? = nil
@@ -96,12 +102,21 @@ struct PostDetailView: View {
         .animation(.easeInOut, value: showComments)
         .navigationTitle("Post")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarDeleteButton }
+        .toolbar {
+            toolbarDeleteButton
+            toolbarMoreButton      // ← NEW
+        }
         .alert("Delete Post?", isPresented: $showDeleteConfirm,
                actions: deleteAlertButtons)
         .overlay { if isDeleting { deletingOverlay } }
         .sheet(isPresented: $showShareSheet)  { shareSheet }
         .sheet(isPresented: $showOutfitSheet) { outfitSheet }
+        .sheet(isPresented: $showReportSheet) {      // ← NEW
+            ReportSheetView(
+                postId: post.id,
+                isPresented: $showReportSheet
+            )
+        }
         .background { chatNavigationLink }
         .onAppear   { attachListenersAndFetch() }
         .onDisappear{ postListener?.remove() }
@@ -354,6 +369,23 @@ struct PostDetailView: View {
             if post.userId == Auth.auth().currentUser?.uid {
                 Button("Delete", role: .destructive) {
                     showDeleteConfirm = true
+                }
+            }
+        }
+    }
+
+    // NEW toolbar button for non‑owners
+    private var toolbarMoreButton: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            if post.userId != Auth.auth().currentUser?.uid {
+                Menu {
+                    Button(role: .destructive) {
+                        showReportSheet = true
+                    } label: {
+                        Label("Report", systemImage: "flag")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
             }
         }
