@@ -2,74 +2,67 @@
 //  PostDetailView.swift
 //  FitSpo
 //
-//  Displays one post (image, likes, comments) plus cached outfit scan.
-//  Now also lets the viewer **report** the post via a sheet.
-//
-//  Updated 2025‑06‑19:
-//  • Added a “More” (ellipsis) toolbar menu for non‑owners
-//    with a “Report” action.
-//  • Presents `ReportSheetView`, which calls
-//    `NetworkService.shared.submitReport(…)`.
+//  Displays one post, its pins, likes & comments.
+//  *2025‑06‑22*  • Image height is capped at a 4:5 ratio so the caption
+//                 area is never pushed below the fold.
 //
 
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import CoreLocation
-import UIKit        // ZoomableAsyncImage
+import UIKit
 
 // ─────────────────────────────────────────────────────────────
 struct PostDetailView: View {
 
-    // MARK: – injected model
+    // ── injected
     let post: Post
     @Environment(\.dismiss) private var dismiss
 
-    // MARK: – author info
+    // ── author
     @State private var authorName      = ""
     @State private var authorAvatarURL = ""
     @State private var isLoadingAuthor = true
 
-    // MARK: – location chip
+    // ── geo
     @State private var locationName = ""
 
-    // MARK: – like state
+    // ── like / comments
     @State private var isLiked: Bool
     @State private var likesCount: Int
-    @State private var showHeartBurst = false
-
-    // MARK: – comments state
-    @State private var commentCount: Int = 0
+    @State private var showHeart = false
+    @State private var commentCount = 0
     @State private var showComments = false
 
-    // MARK: – share / chat state
+    // ── share
     @State private var showShareSheet = false
     @State private var shareChat: Chat?
     @State private var navigateToChat = false
 
-    // MARK: – delete UX
-    @State private var isDeleting        = false
+    // ── delete / report
+    @State private var isDeleting = false
     @State private var showDeleteConfirm = false
+    @State private var showReportSheet  = false
 
-    // MARK: – outfit‑scan sheet
-    @State private var isScanning      = false
-    @State private var outfitItems     : [OutfitItem]
+    // ── outfit pins
+    @State private var outfitItems : [OutfitItem]
+    @State private var outfitTags  : [OutfitTag]
+    @State private var showPins    = false          // default OFF
+    @State private var expandedTag : String? = nil
     @State private var showOutfitSheet = false
 
-    // MARK: – NEW ▶︎ report sheet
-    @State private var showReportSheet = false
-
-    // MARK: – misc
+    // ── misc
     @State private var postListener: ListenerRegistration?
-    @State private var imgRatio: CGFloat? = nil
-    @State private var postTags: [UserTag] = []
+    @State private var imgRatio: CGFloat? = nil     // natural h/w
+    @State private var faceTags: [UserTag] = []
 
-    // MARK: – init
     init(post: Post) {
         self.post = post
-        _isLiked       = State(initialValue: post.isLiked)
-        _likesCount    = State(initialValue: post.likes)
-        _outfitItems   = State(initialValue: post.outfitItems ?? [])
+        _isLiked     = State(initialValue: post.isLiked)
+        _likesCount  = State(initialValue: post.likes)
+        _outfitItems = State(initialValue: post.outfitItems ?? [])
+        _outfitTags  = State(initialValue: post.outfitTags  ?? [])
     }
 
     // =========================================================
@@ -81,7 +74,7 @@ struct PostDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     header
-                    postImage
+                    postImage            // <──── fixed‑height now
                     actionRow
                     captionRow
                     timestampRow
@@ -104,18 +97,19 @@ struct PostDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             toolbarDeleteButton
-            toolbarMoreButton      // ← NEW
+            toolbarMoreButton
         }
         .alert("Delete Post?", isPresented: $showDeleteConfirm,
                actions: deleteAlertButtons)
         .overlay { if isDeleting { deletingOverlay } }
         .sheet(isPresented: $showShareSheet)  { shareSheet }
-        .sheet(isPresented: $showOutfitSheet) { outfitSheet }
-        .sheet(isPresented: $showReportSheet) {      // ← NEW
-            ReportSheetView(
-                postId: post.id,
-                isPresented: $showReportSheet
-            )
+        .sheet(isPresented: $showOutfitSheet) {
+            OutfitItemSheet(items: outfitItems,
+                            isPresented: $showOutfitSheet)
+        }
+        .sheet(isPresented: $showReportSheet) {
+            ReportSheetView(postId: post.id,
+                            isPresented: $showReportSheet)
         }
         .background { chatNavigationLink }
         .onAppear   { attachListenersAndFetch() }
@@ -123,16 +117,13 @@ struct PostDetailView: View {
     }
 
     // MARK: ----------------------------------------------------
-    // MARK: sub‑views
+    // MARK: header
     // MARK: ----------------------------------------------------
-
-    // HEADER
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
             NavigationLink(destination: ProfileView(userId: post.userId)) {
                 avatarView
             }
-
             VStack(alignment: .leading, spacing: 4) {
                 NavigationLink(destination: ProfileView(userId: post.userId)) {
                     Text(isLoadingAuthor ? "Loading…" : authorName)
@@ -149,74 +140,131 @@ struct PostDetailView: View {
         .padding(.horizontal)
     }
 
-    // MAIN IMAGE
+    // MARK: ----------------------------------------------------
+    // MARK: main image (height capped at 4:5)
+    // MARK: ----------------------------------------------------
     private var postImage: some View {
         GeometryReader { geo in
             if let url = URL(string: post.imageURL) {
+
+                // determine which ratio to display (natural vs capped)
+                let naturalRatio = imgRatio ?? 1                // h / w
+                let displayRatio = min(naturalRatio, 1.25)      // cap at 4:5
+                let displayHeight = UIScreen.main.bounds.width * displayRatio
+
                 ZoomableAsyncImage(url: url, aspectRatio: $imgRatio)
-                    .frame(width: geo.size.width,
-                           height: (imgRatio ?? 1) * geo.size.width)
+                    .frame(width: geo.size.width, height: displayHeight)
                     .clipped()
-                    .simultaneousGesture(
+                    .highPriorityGesture(
                         TapGesture(count: 2).onEnded { handleDoubleTapLike() }
                     )
-                    .overlay(HeartBurstView(trigger: $showHeartBurst))
-                    .overlay(
-                        ForEach(postTags) { tag in
-                            NavigationLink(
-                                destination: ProfileView(userId: tag.id)
-                            ) {
-                                Text(tag.displayName)
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(6)
-                                    .background(.thinMaterial, in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .position(
-                                x: tag.xNorm * geo.size.width,
-                                y: tag.yNorm * geo.size.width * (imgRatio ?? 1)
-                            )
+                    .overlay { faceTagOverlay(in: geo, ratio: displayRatio) }
+                    .overlay { if showPins { outfitPins(in: geo, ratio: displayRatio) } }
+                    .overlay(HeartBurstView(trigger: $showHeart))
+                    // shopping‑bag toggle (bottom‑left corner)
+                    .overlay(alignment: .bottomLeading) {
+                        Button {
+                            if outfitItems.isEmpty { showOutfitSheet = true }
+                            else { showPins.toggle() }
+                        } label: {
+                            Image(systemName: showPins ? "bag.fill" : "bag")
+                                .font(.system(size: 17, weight: .semibold))
+                                .padding(12)
+                                .background(.ultraThickMaterial, in: Circle())
                         }
-                    )
+                        .padding(16)
+                    }
             } else {
-                ZStack {
-                    Color.gray.opacity(0.2)
-                    Image(systemName: "photo")
-                        .font(.largeTitle)
-                        .foregroundColor(.white.opacity(0.7))
-                }
+                Color.gray.opacity(0.2)
             }
         }
-        .frame(height: UIScreen.main.bounds.width * (imgRatio ?? 1))
+        .frame(height: UIScreen.main.bounds.width * min(imgRatio ?? 1, 1.25))
     }
 
-    // ACTION ROW  (includes hanger button)
+    // MARK: overlays
+    private func faceTagOverlay(in geo: GeometryProxy, ratio: CGFloat) -> some View {
+        ForEach(faceTags) { tag in
+            NavigationLink(destination: ProfileView(userId: tag.id)) {
+                Text(tag.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .padding(6)
+                    .background(.thinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .position(
+                x: tag.xNorm * geo.size.width,
+                y: tag.yNorm * geo.size.width * ratio
+            )
+        }
+    }
+
+    private func outfitPins(in geo: GeometryProxy, ratio: CGFloat) -> some View {
+        ForEach(outfitTags) { t in
+            if let item = outfitItems.first(where: { $0.id == t.itemId }) {
+                let expanded = expandedTag == t.id
+
+                Group {
+                    if expanded {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.label).bold()
+                            if !item.brand.isEmpty {
+                                Text(item.brand)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if !item.shopURL.isEmpty {
+                                Button("Buy") {
+                                    if let url = URL(string: item.shopURL) {
+                                        UIApplication.shared.open(url)
+                                    }
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                        }
+                        .padding(8)
+                        .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .onTapGesture { expandedTag = nil }
+                    } else {
+                        Text(item.label)
+                            .font(.caption2.weight(.semibold))
+                            .padding(6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .onTapGesture { expandedTag = t.id }
+                    }
+                }
+                .animation(.spring(), value: expandedTag)
+                .position(
+                    x: t.xNorm * geo.size.width,
+                    y: t.yNorm * geo.size.width * ratio
+                )
+            }
+        }
+    }
+
+    // MARK: action row ----------------------------------------
     private var actionRow: some View {
         HStack(spacing: 24) {
-            likeButton
-            Text("\(likesCount)")
-                .font(.subheadline.weight(.semibold))
-
-            commentButton
-            Text("\(commentCount)")
-                .font(.subheadline.weight(.semibold))
-
-            // hanger → opens sheet; will auto‑populate now
-            Button {
-                showOutfitSheet = true
-                if outfitItems.isEmpty { scanOutfit() }
-            } label: {
-                Image(systemName: "hanger")
+            Button(action: toggleLike) {
+                Image(systemName: isLiked ? "heart.fill" : "heart")
                     .font(.title2)
+                    .foregroundColor(isLiked ? .red : .primary)
             }
-            .disabled(isScanning)
+            Text("\(likesCount)").font(.subheadline.bold())
 
-            shareButton
+            Button { showComments = true } label: {
+                Image(systemName: "bubble.right").font(.title2)
+            }
+            Text("\(commentCount)").font(.subheadline.bold())
+
+            Button { showShareSheet = true } label: {
+                Image(systemName: "paperplane").font(.title2)
+            }
             Spacer()
         }
         .padding(.horizontal)
     }
 
+    // MARK: caption / time rows --------------------------------
     private var captionRow: some View {
         HStack(alignment: .top, spacing: 4) {
             NavigationLink(destination: ProfileView(userId: post.userId)) {
@@ -235,16 +283,15 @@ struct PostDetailView: View {
             .padding(.horizontal)
     }
 
+    // MARK: avatar helper --------------------------------------
     @ViewBuilder private var avatarView: some View {
         Group {
-            if let url = URL(string: authorAvatarURL),
-               !authorAvatarURL.isEmpty {
+            if let url = URL(string: authorAvatarURL), !authorAvatarURL.isEmpty {
                 AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .empty:   ProgressView()
-                    case .success: phase.image!.resizable().scaledToFill()
-                    default:       Image(systemName: "person.crop.circle.fill")
-                                    .resizable()
+                    if case .success(let img) = phase {
+                        img.resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "person.crop.circle.fill").resizable()
                     }
                 }
             } else {
@@ -257,31 +304,7 @@ struct PostDetailView: View {
         .clipShape(Circle())
     }
 
-    // MARK: – buttons
-    private var likeButton: some View {
-        Button(action: toggleLike) {
-            Image(systemName: isLiked ? "heart.fill" : "heart")
-                .font(.title2)
-                .foregroundColor(isLiked ? .red : .primary)
-        }
-    }
-
-    private var commentButton: some View {
-        Button { showComments = true } label: {
-            Image(systemName: "bubble.right").font(.title2)
-        }
-    }
-
-    private var shareButton: some View {
-        Button { showShareSheet = true } label: {
-            Image(systemName: "paperplane").font(.title2)
-        }
-    }
-
-    // MARK: ----------------------------------------------------
-    // MARK: post actions
-    // MARK: ----------------------------------------------------
-
+    // MARK: like helpers ---------------------------------------
     private func toggleLike() {
         isLiked.toggle()
         likesCount += isLiked ? 1 : -1
@@ -290,13 +313,12 @@ struct PostDetailView: View {
 
     private func handleDoubleTapLike() {
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-        showHeartBurst = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            showHeartBurst = false
-        }
+        showHeart = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showHeart = false }
         if !isLiked { toggleLike() }
     }
 
+    // MARK: delete / report ------------------------------------
     private func performDelete() {
         isDeleting = true
         NetworkService.shared.deletePost(id: post.id) { res in
@@ -307,74 +329,14 @@ struct PostDetailView: View {
         }
     }
 
-    private func sharePost(to userId: String) {
-        guard let me = Auth.auth().currentUser?.uid else { return }
-        let pair = [me, userId].sorted()
-        NetworkService.shared.createChat(participants: pair) { res in
-            switch res {
-            case .success(let chat):
-                NetworkService.shared.sendPost(chatId: chat.id, postId: post.id) { _ in }
-                DispatchQueue.main.async {
-                    shareChat = chat
-                    navigateToChat = true
-                }
-            case .failure(let err):
-                print("Chat creation error:", err)
-            }
-        }
-    }
-
-    // =========================================================
-    // MARK: Outfit‑AI scan helper
-    // =========================================================
-    @MainActor
-    private func scanOutfit() {
-        guard !isScanning else { return }
-        isScanning  = true
-        outfitItems = []
-
-        Task {
-            defer { isScanning = false }
-            do {
-                let start = try await NetworkService.scanOutfit(
-                    postId:   post.id,
-                    imageURL: post.imageURL
-                )
-                let fin = try await NetworkService.waitForReplicate(prediction: start)
-                let objs = fin.output?.json_data.objects ?? []
-                outfitItems = objs.enumerated().map { idx, det in
-                    OutfitItem(
-                        id: "d\(idx)",
-                        label: det.name,
-                        brand: "",
-                        shopURL: "https://www.google.com/search?q="
-                               + det.name.addingPercentEncoding(
-                                   withAllowedCharacters: .urlQueryAllowed
-                                 )!
-                    )
-                }
-            } catch {
-                print("Outfit scan failed:", error)
-                outfitItems = []
-            }
-        }
-    }
-
-    // MARK: ----------------------------------------------------
-    // MARK: toolbar & sheets
-    // MARK: ----------------------------------------------------
-
     private var toolbarDeleteButton: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
             if post.userId == Auth.auth().currentUser?.uid {
-                Button("Delete", role: .destructive) {
-                    showDeleteConfirm = true
-                }
+                Button("Delete", role: .destructive) { showDeleteConfirm = true }
             }
         }
     }
 
-    // NEW toolbar button for non‑owners
     private var toolbarMoreButton: some ToolbarContent {
         ToolbarItem(placement: .navigationBarTrailing) {
             if post.userId != Auth.auth().currentUser?.uid {
@@ -399,9 +361,11 @@ struct PostDetailView: View {
     private var deletingOverlay: some View {
         ProgressView("Deleting…")
             .padding()
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .background(.regularMaterial,
+                        in: RoundedRectangle(cornerRadius: 8))
     }
 
+    // MARK: share helpers --------------------------------------
     private var shareSheet: some View {
         ShareToUserView { uid in
             showShareSheet = false
@@ -409,13 +373,22 @@ struct PostDetailView: View {
         }
     }
 
-    private var outfitSheet: some View {
-        OutfitItemSheet(
-            items: outfitItems,
-            isScanning: isScanning,
-            isPresented: $showOutfitSheet
-        )
-        .presentationDetents([.fraction(0.45), .large])
+    private func sharePost(to uid: String) {
+        guard let me = Auth.auth().currentUser?.uid else { return }
+        let pair = [me, uid].sorted()
+        NetworkService.shared.createChat(participants: pair) { res in
+            switch res {
+            case .success(let chat):
+                NetworkService.shared.sendPost(chatId: chat.id,
+                                               postId: post.id) { _ in }
+                DispatchQueue.main.async {
+                    shareChat = chat
+                    navigateToChat = true
+                }
+            case .failure(let err):
+                print("Chat creation error:", err.localizedDescription)
+            }
+        }
     }
 
     private var chatNavigationLink: some View {
@@ -428,19 +401,15 @@ struct PostDetailView: View {
         }
     }
 
-    // MARK: ----------------------------------------------------
-    // MARK: Firestore & helpers
-    // MARK: ----------------------------------------------------
-
+    // MARK: Firestore helpers ----------------------------------
     private func attachListenersAndFetch() {
         attachPostListener()
         fetchAuthor()
         fetchLocationName()
         fetchCommentCount()
-        fetchTags()
+        fetchFaceTags()
     }
 
-    /// Listener now also updates `outfitItems` when scanResults becomes available.
     private func attachPostListener() {
         guard postListener == nil else { return }
         postListener = Firestore.firestore()
@@ -448,8 +417,7 @@ struct PostDetailView: View {
             .document(post.id)
             .addSnapshotListener { snap, _ in
                 guard let d = snap?.data() else { return }
-
-                likesCount   = d["likes"] as? Int ?? likesCount
+                likesCount   = d["likes"]         as? Int ?? likesCount
                 commentCount = d["commentsCount"] as? Int ?? commentCount
 
                 if let likedBy = d["likedBy"] as? [String],
@@ -457,21 +425,8 @@ struct PostDetailView: View {
                     isLiked = likedBy.contains(uid)
                 }
 
-                // NEW – parse scanResults in real time
-                if let raw = d["scanResults"] as? [[String:Any]] {
-                    let parsed: [OutfitItem] = raw.compactMap { dict in
-                        guard
-                            let label = dict["label"]   as? String,
-                            let shop  = dict["shopURL"] as? String
-                        else { return nil }
-                        let brand = dict["brand"] as? String ?? ""
-                        return OutfitItem(id: UUID().uuidString,
-                                          label: label,
-                                          brand: brand,
-                                          shopURL: shop)
-                    }
-                    if !parsed.isEmpty { outfitItems = parsed }
-                }
+                outfitItems = NetworkService.parseOutfitItems(d["scanResults"])
+                outfitTags  = NetworkService.parseOutfitTags (d["outfitTags"])
             }
     }
 
@@ -488,15 +443,9 @@ struct PostDetailView: View {
 
     private func fetchLocationName() {
         guard let lat = post.latitude, let lon = post.longitude else { return }
-        CLGeocoder().reverseGeocodeLocation(
-            CLLocation(latitude: lat, longitude: lon)
-        ) { places, _ in
-            guard let p = places?.first else { return }
-            var parts = [String]()
-            if let city   = p.locality           { parts.append(city) }
-            if let region = p.administrativeArea { parts.append(region) }
-            if parts.isEmpty, let country = p.country { parts.append(country) }
-            locationName = parts.joined(separator: ", ")
+        let loc = CLLocation(latitude: lat, longitude: lon)
+        CLGeocoder().reverseGeocodeLocation(loc) { places, _ in
+            locationName = places?.first?.locality ?? ""
         }
     }
 
@@ -506,10 +455,9 @@ struct PostDetailView: View {
         }
     }
 
-    private func fetchTags() {
+    private func fetchFaceTags() {
         NetworkService.shared.fetchTags(for: post.id) { res in
-            if case .success(let list) = res { postTags = list }
+            if case .success(let list) = res { faceTags = list }
         }
     }
 }
-//  End of PostDetailView.swift

@@ -2,6 +2,9 @@
 //  NetworkService+OutfitScan.swift
 //  FitSpo
 //
+//  Polls the Replicate job until it finishes.
+//  Updated 2025‑06‑19: allow up to ~60 s instead of 30 s.
+//
 
 import Foundation
 import FirebaseFunctions
@@ -24,8 +27,7 @@ struct ReplicateOutput: Decodable {
     let json_data: JsonData
 }
 
-/// Accepts OWL‑ViT “label”, FashionPedia “category”, or a fallback “name”
-struct DetectedObject: Decodable, Identifiable {          // 👈🏻 only *Decodable*
+struct DetectedObject: Decodable, Identifiable {
     let id         = UUID()
     let name       : String
     let confidence : Double
@@ -55,10 +57,10 @@ struct DetectedObject: Decodable, Identifiable {          // 👈🏻 only *Deco
 @MainActor
 extension NetworkService {
 
-    /// ① Kick off Cloud Function
+    /// Kick off the Cloud Function that starts a Replicate job.
     static func scanOutfit(postId: String,
                            imageURL: String) async throws -> ReplicateJob {
-        let functions = Functions.functions(region: "us-central1")    // new fetcher
+        let functions = Functions.functions(region: "us-central1")
         let body: [String: Any] = ["postId": postId, "imageURL": imageURL]
         let data = try await functions.httpsCallable("scanOutfit").call(body)
         return try JSONDecoder().decode(
@@ -67,19 +69,20 @@ extension NetworkService {
         ).replicate
     }
 
-    /// ② Poll until the model finishes (≈30 s max)
+    /// Poll Replicate every 2 s until the job leaves “starting/processing”.
+    /// Now allows up to **29 polls ≈ 58 s** before giving up.
     static func waitForReplicate(prediction job: ReplicateJob) async throws -> ReplicateJob {
-        var current = job; var tries = 0
-        while ["starting","processing"].contains(current.status) {
+        var current = job
+        var tries   = 0
+        while ["starting", "processing"].contains(current.status) {
             try await Task.sleep(for: .seconds(2))
             current = try await fetchReplicate(jobID: current.id)
-            guard tries < 15 else { throw URLError(.timedOut) }
+            guard tries < 29 else { throw URLError(.timedOut) }  // ← was 15
             tries += 1
         }
         return current
     }
 
-    /// latest job JSON
     private static func fetchReplicate(jobID: String) async throws -> ReplicateJob {
         let functions = Functions.functions(region: "us-central1")
         let res = try await functions
