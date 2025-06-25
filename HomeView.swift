@@ -3,6 +3,9 @@
 //  FitSpo
 //
 //  Masonry feed with pull‑to‑refresh + endless scroll.
+//  Updated 2025‑06‑26:
+//  • Switched column stacks to LazyVStack so off‑screen cards are not built.
+//  • Added lastPrefetchIndex guard to avoid duplicate triggers.
 //
 
 import SwiftUI
@@ -18,8 +21,9 @@ struct HomeView: View {
     @State private var isLoadingPage = false
     @State private var isRefreshing  = false
 
-    private let PAGE_SIZE    = 7       // posts per fetch
-    private let PREFETCH_AHEAD = 3       // start loading when <= N left
+    private let PAGE_SIZE      = 12           // first load ≈10‑15 posts
+    private let PREFETCH_AHEAD = 4            // when ≤4 remain → fetch
+    @State private var lastPrefetchIndex = -1 // prevents duplicate calls
 
     // Split into two columns
     private var leftColumn:  [Post] { posts.enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element) }
@@ -77,7 +81,7 @@ struct HomeView: View {
     // MARK: masonry column
     @ViewBuilder
     private func column(for list: [Post]) -> some View {
-        VStack(spacing: 8) {
+        LazyVStack(spacing: 8) {                 // ← now lazy!
             ForEach(list) { post in
                 PostCardView(post: post) { toggleLike(post) }
                     .onAppear { maybePrefetch(after: post) }
@@ -91,9 +95,12 @@ struct HomeView: View {
     private func maybePrefetch(after post: Post) {
         guard let idx = posts.firstIndex(where: { $0.id == post.id }) else { return }
         let remaining = posts.count - idx - 1
-        if remaining < PREFETCH_AHEAD {
-            loadNextPage()
-        }
+        guard remaining <= PREFETCH_AHEAD else { return }
+
+        // Only trigger once per index to avoid race conditions
+        guard idx != lastPrefetchIndex else { return }
+        lastPrefetchIndex = idx
+        loadNextPage()
     }
 
     // MARK: initial fetch
@@ -124,9 +131,10 @@ struct HomeView: View {
                 isLoadingPage = false
                 switch res {
                 case .success(let tuple):
-                    // avoid duplicates if Firestore returns overlapping docs
                     let newOnes = tuple.0.filter { p in !posts.contains(where: { $0.id == p.id }) }
-                    posts.append(contentsOf: newOnes)
+                    withAnimation(.easeIn) {
+                        posts.append(contentsOf: newOnes)
+                    }
                     cursor     = tuple.1
                     reachedEnd = tuple.1 == nil
                 case .failure(let err):
@@ -142,14 +150,17 @@ struct HomeView: View {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        reachedEnd = false
+
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             NetworkService.shared.fetchPostsPage(pageSize: PAGE_SIZE, after: nil) { res in
                 DispatchQueue.main.async {
                     switch res {
                     case .success(let tuple):
-                        posts      = tuple.0
+                        withAnimation(.easeIn) { posts = tuple.0 }
                         cursor     = tuple.1
                         reachedEnd = tuple.1 == nil
+                        lastPrefetchIndex = -1          // reset for fresh paging
                     case .failure(let err):
                         print("Refresh error:", err)
                     }
