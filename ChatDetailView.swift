@@ -66,17 +66,24 @@ struct ChatDetailView: View {
         .onDisappear { listener?.remove() }
     }
 
-    // MARK: – Message content (text or post thumbnail)
+    // MARK: – Message content (text, post thumbnail, or profile share)
     @ViewBuilder
     private func messageContent(for msg: Message, incoming: Bool) -> some View {
         if let pid = msg.postId {
             sharedPostThumbnail(postId: pid)
+        } else if let profileUserId = msg.profileUserId,
+                  let profileDisplayName = msg.profileDisplayName {
+            sharedProfileThumbnail(
+                profileUserId: profileUserId,
+                profileDisplayName: profileDisplayName,
+                profileAvatarURL: msg.profileAvatarURL
+            )
         } else {
             Text(msg.text ?? "")
                 .padding(10)
                 .background(incoming
                             ? Color.gray.opacity(0.2)
-                            : Color.blue.opacity(0.8))
+                            : Color.black.opacity(0.8))
                 .foregroundColor(incoming ? .primary : .white)
                 .cornerRadius(12)
                 .frame(maxWidth: 250, alignment: incoming ? .leading : .trailing)
@@ -122,6 +129,67 @@ struct ChatDetailView: View {
                 .onAppear { fetchPostIfNeeded(id: postId) }
         }
     }
+    
+    // MARK: – Shared‐profile thumbnail
+    @ViewBuilder
+    private func sharedProfileThumbnail(
+        profileUserId: String,
+        profileDisplayName: String,
+        profileAvatarURL: String?
+    ) -> some View {
+        NavigationLink(destination: ProfileView(userId: profileUserId)) {
+            HStack(spacing: 12) {
+                // Profile avatar
+                if let avatarURL = profileAvatarURL, let url = URL(string: avatarURL) {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .empty:
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        case .success(let img):
+                            img.resizable().scaledToFill()
+                        case .failure:
+                            Image(systemName: "person.crop.circle.fill")
+                                .resizable()
+                                .foregroundColor(.gray)
+                        @unknown default:
+                            EmptyView()
+                        }
+                    }
+                    .frame(width: 40, height: 40)
+                    .clipShape(Circle())
+                } else {
+                    Image(systemName: "person.crop.circle.fill")
+                        .resizable()
+                        .frame(width: 40, height: 40)
+                        .foregroundColor(.gray)
+                        .clipShape(Circle())
+                }
+                
+                // Profile info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profileDisplayName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                    
+                    Text("View Profile")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                // Profile icon
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 16))
+                    .foregroundColor(.blue)
+            }
+            .padding(12)
+            .background(Color(.systemGray6))
+            .cornerRadius(12)
+            .frame(width: 200)
+        }
+    }
 
     // MARK: – Firestore listener
     private func startListening() {
@@ -141,7 +209,10 @@ struct ChatDetailView: View {
                         senderId:  sid,
                         text:      d["text"]   as? String,
                         postId:    d["postId"] as? String,
-                        timestamp: ts.dateValue()
+                        timestamp: ts.dateValue(),
+                        profileUserId: d["profileUserId"] as? String,
+                        profileDisplayName: d["profileDisplayName"] as? String,
+                        profileAvatarURL: d["profileAvatarURL"] as? String
                     )
                 }
                 // pre-fetch any new shared posts

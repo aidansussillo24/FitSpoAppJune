@@ -3,9 +3,10 @@
 //  FitSpo
 //
 //  Masonry feed with pull‑to‑refresh + endless scroll.
-//  Updated 2025‑06‑26:
-//  • Switched column stacks to LazyVStack so off‑screen cards are not built.
-//  • Added lastPrefetchIndex guard to avoid duplicate triggers.
+//  Updated 2025‑06‑30:
+//  • Added separate navigation targets in Hot‑Today row.
+//    – Tap 🔥 Hot Today  ➜  HotPostsView (top‑10 feed)
+//    – Tap any avatar   ➜  PostDetailView for that post.
 //
 
 import SwiftUI
@@ -21,9 +22,12 @@ struct HomeView: View {
     @State private var isLoadingPage = false
     @State private var isRefreshing  = false
 
-    private let PAGE_SIZE      = 12           // first load ≈10‑15 posts
+    private let PAGE_SIZE      = 12           // full page size
+    private let FIRST_BATCH    = 4            // show first two rows fast
     private let PREFETCH_AHEAD = 4            // when ≤4 remain → fetch
     @State private var lastPrefetchIndex = -1 // prevents duplicate calls
+
+
 
     // Split into two columns
     private var leftColumn:  [Post] { posts.enumerated().filter { $0.offset.isMultiple(of: 2) }.map(\.element) }
@@ -36,13 +40,17 @@ struct HomeView: View {
                     header
 
                     // ── Masonry grid
-                    HStack(alignment: .top, spacing: 8) {
-                        column(for: leftColumn)
-                        column(for: rightColumn)
+                    if posts.isEmpty && isLoadingPage {
+                        skeletonGrid
+                    } else {
+                        HStack(alignment: .top, spacing: 8) {
+                            column(for: leftColumn)
+                            column(for: rightColumn)
+                        }
+                        .padding(.horizontal, 12)
                     }
-                    .padding(.horizontal, 16)
 
-                    if isLoadingPage {
+                    if isLoadingPage && !posts.isEmpty {
                         ProgressView()
                             .padding(.vertical, 32)
                     }
@@ -52,11 +60,15 @@ struct HomeView: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
                             .padding(.vertical, 32)
+                            .padding(.top, 16)
                     }
                 }
             }
             .refreshable { await refresh() }
             .onAppear(perform: initialLoad)
+            .onReceive(NotificationCenter.default.publisher(for: .didUploadPost)) { _ in
+                Task { await refresh() }
+            }
             .navigationBarHidden(true)
         }
     }
@@ -66,6 +78,10 @@ struct HomeView: View {
         ZStack {
             Text("FitSpo").font(.largeTitle).fontWeight(.black)
             HStack {
+                NavigationLink(destination: ActivityView()) {
+                    Image(systemName: "bell")
+                        .font(.title2)
+                }
                 Spacer()
                 NavigationLink(destination: MessagesView()) {
                     Image(systemName: "bubble.left.and.bubble.right")
@@ -74,14 +90,33 @@ struct HomeView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 16)
+        .padding(.top, 24)
         .padding(.bottom, 8)
+    }
+
+
+
+    // MARK: skeleton grid
+    private var skeletonGrid: some View {
+        HStack(alignment: .top, spacing: 8) {
+            LazyVStack(spacing: 8) {
+                ForEach(0..<3, id: \.self) { _ in
+                    PostCardSkeleton()
+                }
+            }
+            LazyVStack(spacing: 8) {
+                ForEach(0..<3, id: \.self) { _ in
+                    PostCardSkeleton()
+                }
+            }
+        }
+        .padding(.horizontal, 12)
     }
 
     // MARK: masonry column
     @ViewBuilder
     private func column(for list: [Post]) -> some View {
-        LazyVStack(spacing: 8) {                 // ← now lazy!
+        LazyVStack(spacing: 8) {
             ForEach(list) { post in
                 PostCardView(post: post) { toggleLike(post) }
                     .onAppear { maybePrefetch(after: post) }
@@ -107,15 +142,18 @@ struct HomeView: View {
     private func initialLoad() {
         guard posts.isEmpty, !isLoadingPage else { return }
         isLoadingPage = true
-        NetworkService.shared.fetchPostsPage(pageSize: PAGE_SIZE, after: nil) { res in
+        NetworkService.shared.fetchPostsPage(pageSize: FIRST_BATCH, after: nil) { res in
             DispatchQueue.main.async {
-                isLoadingPage = false
                 switch res {
                 case .success(let tuple):
-                    posts      = tuple.0
+                    withAnimation(.easeIn) { posts = tuple.0 }
                     cursor     = tuple.1
                     reachedEnd = tuple.1 == nil
+                    isLoadingPage = false
+                    if !reachedEnd { loadAdditionalForFirstPage() }
+                    updateSaveStates()
                 case .failure(let err):
+                    isLoadingPage = false
                     print("Initial load error:", err)
                 }
             }
@@ -132,13 +170,31 @@ struct HomeView: View {
                 switch res {
                 case .success(let tuple):
                     let newOnes = tuple.0.filter { p in !posts.contains(where: { $0.id == p.id }) }
-                    withAnimation(.easeIn) {
-                        posts.append(contentsOf: newOnes)
-                    }
+                    withAnimation(.easeIn) { posts.append(contentsOf: newOnes) }
                     cursor     = tuple.1
                     reachedEnd = tuple.1 == nil
+                    updateSaveStates()
                 case .failure(let err):
                     print("Next page error:", err)
+                }
+            }
+        }
+    }
+
+    // Fetch remaining posts for first page after initial batch
+    private func loadAdditionalForFirstPage() {
+        NetworkService.shared.fetchPostsPage(pageSize: PAGE_SIZE - FIRST_BATCH,
+                                             after: cursor) { res in
+            DispatchQueue.main.async {
+                switch res {
+                case .success(let tuple):
+                    let newOnes = tuple.0.filter { p in !posts.contains(where: { $0.id == p.id }) }
+                    withAnimation(.easeIn) { posts.append(contentsOf: newOnes) }
+                    cursor     = tuple.1
+                    reachedEnd = tuple.1 == nil
+                    updateSaveStates()
+                case .failure(let err):
+                    print("Initial page extend error:", err)
                 }
             }
         }
@@ -160,7 +216,8 @@ struct HomeView: View {
                         withAnimation(.easeIn) { posts = tuple.0 }
                         cursor     = tuple.1
                         reachedEnd = tuple.1 == nil
-                        lastPrefetchIndex = -1          // reset for fresh paging
+                        lastPrefetchIndex = -1
+                        updateSaveStates()
                     case .failure(let err):
                         print("Refresh error:", err)
                     }
@@ -172,15 +229,42 @@ struct HomeView: View {
 
     // MARK: like handling
     private func toggleLike(_ post: Post) {
+        print("HomeView: Toggle like for post: \(post.id), current liked: \(post.isLiked), likes: \(post.likes)")
         NetworkService.shared.toggleLike(post: post) { result in
             DispatchQueue.main.async {
                 if case .success(let updated) = result,
                    let idx = posts.firstIndex(where: { $0.id == updated.id }) {
+                    print("HomeView: Like toggle success - updating post at index \(idx) with likes: \(updated.likes), liked: \(updated.isLiked)")
                     posts[idx] = updated
+                } else if case .failure(let error) = result {
+                    print("HomeView: Like toggle failed: \(error.localizedDescription)")
                 }
             }
         }
     }
+    
+    // MARK: save state handling
+    private func updateSaveStates() {
+        let postIds = posts.map { $0.id }
+        NetworkService.shared.checkSaveStates(for: postIds) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let saveStates):
+                    for (index, post) in posts.enumerated() {
+                        if let isSaved = saveStates[post.id] {
+                            var updatedPost = post
+                            updatedPost.isSaved = isSaved
+                            posts[index] = updatedPost
+                        }
+                    }
+                case .failure(let error):
+                    print("Error updating save states: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+
 }
 
 #if DEBUG

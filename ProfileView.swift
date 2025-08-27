@@ -27,119 +27,60 @@ struct ProfileView: View {
     @State private var avatarURL     = ""
     @State private var email         = ""
     @State private var posts: [Post] = []
+    @State private var taggedPosts: [Post] = []
+    @State private var savedPosts: [Post] = []
     @State private var followersCount = 0
     @State private var followingCount = 0
     @State private var isFollowing    = false
     @State private var isLoadingPosts = false
+    @State private var isLoadingTagged = false
+    @State private var isLoadingSaved = false
     @State private var errorMessage   = ""
     @State private var showingEdit    = false
 
     // Messaging
     @State private var activeChat: Chat?
     @State private var showChat = false
+    
+    // Profile sharing
+    @State private var showShareSheet = false
+    @State private var shareChat: Chat?
+    @State private var navigateToChat = false
+    
+    // Tab state
+    @State private var selectedTab = 0 // 0=Posts, 1=Tagged, 2=Saved
 
     private let db = Firestore.firestore()
 
-    // Two-column post grid
+    // Three-column post grid (Instagram style)
     private let columns = [
-        GridItem(.flexible(), spacing: 8),
-        GridItem(.flexible(), spacing: 8)
+        GridItem(.flexible(), spacing: 1),
+        GridItem(.flexible(), spacing: 1),
+        GridItem(.flexible(), spacing: 1)
     ]
 
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: 16) {
-
-                    avatarSection                                          // avatar
-
-                    // Name / @username / email / bio
-                    VStack(spacing: 4) {
-                        Text(displayName).font(.title2).bold()
-                        if !username.isEmpty {
-                            Text("@\(username)")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        if isMe, !email.isEmpty {
-                            Text(email)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        if !bio.isEmpty {
-                            Text(bio)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal)
-                        }
-                    }
-
-                    // Stats
-                    HStack(spacing: 32) {
-                        navStat(count: followersCount, label: "Followers",
-                                destination: FollowersView(userId: userId))
-                        navStat(count: followingCount, label: "Following",
-                                destination: FollowingView(userId: userId))
-                        statView(count: posts.count, label: "Posts")
-                    }
-
-                    // Buttons
-                    if isMe {
-                        Button("Edit Profile") { showingEdit = true }
-                            .buttonStyle(.borderedProminent)
-                            .padding(.top)
-                    } else {
-                        Button(isFollowing ? "Unfollow" : "Follow") {
-                            toggleFollow()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .padding(.top)
-
-                        Button {
-                            openChat()
-                        } label: {
-                            Label("Message", systemImage: "bubble.left.and.bubble.right")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .padding(.top, 8)
-                    }
-
-                    if !errorMessage.isEmpty {
-                        Text(errorMessage)
-                            .foregroundColor(.red)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-
-                    Divider().padding(.vertical, 8)
-
-                    // Posts grid
-                    if isLoadingPosts {
-                        ProgressView().scaleEffect(1.5).padding()
-                    } else {
-                        LazyVGrid(columns: columns, spacing: 8) {
-                            ForEach(posts) { post in
-                                NavigationLink {
-                                    PostDetailView(post: post)
-                                } label: {
-                                    PostCell(post: post)
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                            }
-                        }
-                        .padding(.horizontal, 8)
-                    }
+                VStack(spacing: 0) {
+                    // FitSpo Profile Header
+                    profileHeaderSection
+                    
+                    // Content Tabs & Grid
+                    contentSection
                 }
-                .padding(.bottom, 16)
             }
             .navigationTitle(displayName.isEmpty ? "Profile" : displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Sign Out") { try? Auth.auth().signOut() }
+                if isMe {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Sign Out") { try? Auth.auth().signOut() }
+                    }
                 }
             }
             .sheet(isPresented: $showingEdit) { EditProfileView() }
+            .sheet(isPresented: $showShareSheet) { shareSheet }
             .background(
                 Group {
                     if let chat = activeChat {
@@ -148,9 +89,304 @@ struct ProfileView: View {
                             isActive: $showChat
                         ) { EmptyView() }
                     }
+                    if let chat = shareChat {
+                        NavigationLink(
+                            destination: ChatDetailView(chat: chat),
+                            isActive: $navigateToChat
+                        ) { EmptyView() }
+                    }
                 }
             )
             .onAppear(perform: loadEverything)
+        }
+    }
+    
+    // MARK: - FitSpo Profile Header
+    private var profileHeaderSection: some View {
+        VStack(spacing: 0) {
+            // Top section with centered avatar
+            VStack(spacing: 16) {
+                // Centered avatar with fashion-inspired styling
+                avatarSection
+                    .overlay(
+                        Circle()
+                            .stroke(
+                                LinearGradient(
+                                    colors: [.purple.opacity(0.3), .pink.opacity(0.3), .orange.opacity(0.3)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 2
+                            )
+                    )
+                
+                // Name and bio
+                VStack(spacing: 8) {
+                    Text(displayName.isEmpty ? "Loading..." : displayName)
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                    
+                    if !username.isEmpty {
+                        Text("@\(username)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    if !bio.isEmpty {
+                        Text(bio)
+                            .font(.body)
+                            .foregroundColor(.primary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(3)
+                            .padding(.horizontal, 20)
+                    }
+                    
+                    if isMe, !email.isEmpty {
+                        Text(email)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // Stats Row
+                HStack(spacing: 40) {
+                    navStat(count: posts.count, label: "Posts", destination: EmptyView())
+                    navStat(count: followersCount, label: "Followers", destination: FollowersView(userId: userId))
+                    navStat(count: followingCount, label: "Following", destination: FollowingView(userId: userId))
+                }
+                .padding(.horizontal, 20)
+                
+                // Action Buttons
+                HStack(spacing: 12) {
+                    if isMe {
+                        Button("Edit Style Profile") { showingEdit = true }
+                            .buttonStyle(FitSpoButtonStyle(isPrimary: false))
+                        
+                        Button("Share Profile") { 
+                            showShareSheet = true
+                        }
+                            .buttonStyle(FitSpoButtonStyle(isPrimary: false))
+                        
+                    } else {
+                        Button(isFollowing ? "Following" : "Follow") {
+                            toggleFollow()
+                        }
+                        .buttonStyle(FitSpoButtonStyle(isPrimary: !isFollowing))
+                        
+                        Button("Message") {
+                            openChat()
+                        }
+                        .buttonStyle(FitSpoButtonStyle(isPrimary: false))
+                    }
+                }
+                .padding(.horizontal, 20)
+                
+                if !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                        .padding(.horizontal, 20)
+                }
+            }
+            .padding(.vertical, 24)
+            .background(
+                LinearGradient(
+                    colors: [Color(.systemBackground), Color(.systemGray6).opacity(0.3)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+    
+    // MARK: - Content Section
+    private var contentSection: some View {
+        VStack(spacing: 0) {
+            // Fashion-focused tabs
+            HStack(spacing: 0) {
+                tabButton(index: 0, icon: "grid", label: "OUTFITS")
+                tabButton(index: 1, icon: "tag", label: "TAGGED")
+                tabButton(index: 2, icon: "heart", label: "SAVED")
+            }
+            .background(Color(.systemBackground))
+            .overlay(
+                Rectangle()
+                    .frame(height: 0.5)
+                    .foregroundColor(Color(.separator)),
+                alignment: .bottom
+            )
+            
+            // Content based on selected tab
+            Group {
+                switch selectedTab {
+                case 0:
+                    postsGrid
+                case 1:
+                    taggedContent
+                case 2:
+                    savedContent
+                default:
+                    postsGrid
+                }
+            }
+        }
+    }
+    
+    private func tabButton(index: Int, icon: String, label: String) -> some View {
+        Button(action: { selectedTab = index }) {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .medium))
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.5)
+            }
+            .foregroundColor(selectedTab == index ? .primary : .secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .overlay(
+                Rectangle()
+                    .frame(height: 2)
+                    .foregroundColor(selectedTab == index ? .primary : .clear),
+                alignment: .bottom
+            )
+        }
+    }
+    
+    private var postsGrid: some View {
+        Group {
+            if isLoadingPosts {
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .padding(60)
+            } else if posts.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "hanger")
+                        .font(.system(size: 50))
+                        .foregroundColor(.secondary)
+                    Text("No Outfits Yet")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("Start sharing your style! Your outfit posts will appear here.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+                .padding(60)
+            } else {
+                LazyVGrid(columns: columns, spacing: 1) {
+                    ForEach(posts) { post in
+                        NavigationLink {
+                            PostDetailView(post: post)
+                        } label: {
+                            PostCell(post: post)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+    
+    private var taggedContent: some View {
+        Group {
+            if isLoadingTagged {
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .padding(60)
+            } else if taggedPosts.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "tag")
+                        .font(.system(size: 50))
+                        .foregroundColor(.secondary)
+                    Text("No Tagged Posts")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("Posts you're tagged in will appear here.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(60)
+            } else {
+                LazyVGrid(columns: columns, spacing: 1) {
+                    ForEach(taggedPosts) { post in
+                        NavigationLink {
+                            PostDetailView(post: post)
+                        } label: {
+                            PostCell(post: post)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+    
+    private var savedContent: some View {
+        Group {
+            if isLoadingSaved {
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .padding(60)
+            } else if savedPosts.isEmpty {
+                VStack(spacing: 20) {
+                    Image(systemName: "bookmark")
+                        .font(.system(size: 50))
+                        .foregroundColor(.secondary)
+                    Text("No Saved Posts")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("Save outfit inspiration to view here.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(60)
+            } else {
+                LazyVGrid(columns: columns, spacing: 1) {
+                    ForEach(savedPosts) { post in
+                        NavigationLink {
+                            PostDetailView(post: post)
+                        } label: {
+                            PostCell(post: post)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Profile Sharing
+    private var shareSheet: some View {
+        ShareToUserView { uid in
+            showShareSheet = false
+            shareProfile(to: uid)
+        }
+    }
+    
+    private func shareProfile(to uid: String) {
+        guard let me = Auth.auth().currentUser?.uid else { return }
+        let pair = [me, uid].sorted()
+        NetworkService.shared.createChat(participants: pair) { res in
+            switch res {
+            case .success(let chat):
+                NetworkService.shared.sendProfile(
+                    chatId: chat.id,
+                    profileUserId: userId,
+                    profileDisplayName: displayName.isEmpty ? "Unknown User" : displayName,
+                    profileAvatarURL: avatarURL.isEmpty ? nil : avatarURL
+                ) { _ in }
+                DispatchQueue.main.async {
+                    shareChat = chat
+                    navigateToChat = true
+                }
+            case .failure(let err):
+                print("Chat creation error:", err.localizedDescription)
+            }
         }
     }
 
@@ -163,41 +399,54 @@ struct ProfileView: View {
             if let url = URL(string: avatarURL), !avatarURL.isEmpty {
                 AsyncImage(url: url) { phase in
                     switch phase {
-                    case .empty:   ProgressView()
+                    case .empty:
+                        ProgressView()
+                            .frame(width: 100, height: 100)
                     case .success(let img):
-                        img.resizable().scaledToFill()
+                        img.resizable()
+                            .scaledToFill()
                     case .failure:
-                        Image(systemName: "person.crop.circle.badge.exclamationmark")
+                        Image(systemName: "person.crop.circle.fill")
                             .resizable()
+                            .foregroundColor(.gray)
                     @unknown default: EmptyView()
                     }
                 }
-                .frame(width: 120, height: 120)
+                .frame(width: 100, height: 100)
                 .clipShape(Circle())
             } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
-                    .frame(width: 120, height: 120)
+                    .frame(width: 100, height: 100)
                     .foregroundColor(.gray)
             }
         }
-        .padding(.top, 16)
     }
 
     // MARK: – Stat helpers
     private func statView(count: Int, label: String) -> some View {
-        VStack {
-            Text("\(count)").font(.headline)
-            Text(label).font(.caption)
+        VStack(spacing: 2) {
+            Text("\(count)")
+                .font(.title2)
+                .fontWeight(.bold)
+            Text(label)
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
         }
     }
 
     @ViewBuilder
     private func navStat<Dest: View>(count: Int, label: String, destination: Dest) -> some View {
-        NavigationLink(destination: destination) {
-            statView(count: count, label: label).foregroundColor(.blue)
+        if label == "Posts" {
+            statView(count: count, label: label)
+        } else {
+            NavigationLink(destination: destination) {
+                statView(count: count, label: label)
+                    .foregroundColor(.primary)
+            }
+            .buttonStyle(PlainButtonStyle())
         }
-        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -207,6 +456,8 @@ private extension ProfileView {
     func loadEverything() {
         loadProfile()
         loadUserPosts()
+        loadTaggedPosts()
+        loadSavedPosts()
         loadFollowState()
         loadFollowCounts()
     }
@@ -230,6 +481,42 @@ private extension ProfileView {
                 isLoadingPosts = false
                 if case .success(let all) = result {
                     posts = all.filter { $0.userId == userId }
+                }
+            }
+        }
+    }
+    
+    func loadTaggedPosts() {
+        print("👤 Loading tagged posts for user ID: \(userId)")
+        isLoadingTagged = true
+        NetworkService.shared.fetchTaggedPosts(for: userId) { result in
+            DispatchQueue.main.async {
+                isLoadingTagged = false
+                switch result {
+                case .success(let tagged):
+                    print("📱 ProfileView received \(tagged.count) tagged posts")
+                    taggedPosts = tagged
+                case .failure(let error):
+                    print("❌ ProfileView error loading tagged posts: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func loadSavedPosts() {
+        // Only load saved posts for the current user's own profile
+        guard isMe else { return }
+        
+        isLoadingSaved = true
+        NetworkService.shared.fetchSavedPosts { result in
+            DispatchQueue.main.async {
+                isLoadingSaved = false
+                switch result {
+                case .success(let saved):
+                    print("📱 ProfileView received \(saved.count) saved posts")
+                    savedPosts = saved
+                case .failure(let error):
+                    print("❌ ProfileView error loading saved posts: \(error.localizedDescription)")
                 }
             }
         }
@@ -286,4 +573,32 @@ private extension ProfileView {
     }
 }
 
-//  End of file
+// MARK: - FitSpo Button Styles
+struct FitSpoButtonStyle: ButtonStyle {
+    let isPrimary: Bool
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(isPrimary ? .white : .primary)
+            .frame(height: 36)
+            .frame(maxWidth: .infinity)
+            .background(
+                Group {
+                    if isPrimary {
+                        LinearGradient(
+                            colors: [.purple, .pink, .orange],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    } else {
+                        Color(.systemGray5)
+                    }
+                }
+            )
+            .cornerRadius(18)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}

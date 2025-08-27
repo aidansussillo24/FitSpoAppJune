@@ -31,6 +31,6 @@ struct PostCell: View, Identifiable {
                 EmptyView()
             }
         }
-        .cornerRadius(8)
+        .cornerRadius(4)
     }
 }
